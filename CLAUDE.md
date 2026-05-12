@@ -22,7 +22,8 @@ This is `~/.openclaw/` — the OpenClaw config/state directory. **Only `workspac
 - **`workspace/scan-ho-so/lib/drive_helpers.py`** — Google Drive API wrappers with an in-process folder/list cache: `get_or_create_folder`, `list_folder`, `upload_file`/`replace_file`, `delete_file`, `rename_file`, `find_file_by_name`, `copy_file`, `download_file_text`/`download_file_bytes`. All run **on the asyncio event loop, never in a thread** (the Drive client / httplib2 is not thread-safe — only OpenRouter calls are offloaded with `asyncio.to_thread`).
 - **`workspace/scan-ho-so/lib/sop_naming.py`** — doc-type classification + the SOP filename builder (the `LOAI-Họ Tên.ext` convention).
 - **`workspace/scan-ho-so/lib/google_clients.py`** — Drive/Sheets API client init.
-- **`workspace/scan-ho-so/data/`** — config data: `provinces_34.json` (the 34 administrative units, effective 2025-06-12 — read by `lib/checklist.py`), `customer-folder-structure.json` (reference: the 4 top folders + subfolders).
+- **`workspace/scan-ho-so/lib/diadia.py`** — deterministic old↔new Vietnamese administrative-unit lookup (2025 reform), reading `data/admin/`: `resolve_address(text)`, `same_place(a,b)`, `commune_merge_info(name)`. Used by `checklist.py` (attaches `profile["_dia_gioi"]` as ground-truth for tầng 2 — so a doc saying "Vĩnh Phúc" and one saying "Phú Thọ" aren't flagged as a contradiction) and by `chat.py` (the `NEED_ADDR` mechanism). **Not an HTTP service** — flat JSON loaded into memory, lazily, cached.
+- **`workspace/scan-ho-so/data/`** — config data: `provinces_34.json` (the 34 provincial units + a province `old_to_new` map + effective dates — read by `lib/checklist.py`), `customer-folder-structure.json` (reference: the 4 top folders + subfolders), and **`data/admin/`** — the admin-boundary tables for `lib/diadia.py` (`province_new.json`, `ward_new.json`, `old_to_new_wards.json` [10,358 rows, derived from `admin_mapping_old_to_new.xlsx`], `_convert_xlsx.py`, `SOURCES.md`; data sourced from the VietMap repo — see `SOURCES.md`, which also has the license note: use offline freely, don't modify-and-republish).
 - **`workspace/scan-ho-so/archive/run_sop_v2.py`** — an old one-off SOP dev script, superseded; kept for reference, not run.
 - **`workspace/scan-ho-so/README.md`** — the in-folder map of all of the above.
 
@@ -37,7 +38,7 @@ This is `~/.openclaw/` — the OpenClaw config/state directory. **Only `workspac
 
 ```bash
 # the "tests" — each prints "OK"; run from the bot dir
-cd ~/.openclaw/workspace/scan-ho-so && python3 scan_pipeline.py --self-test && python3 lib/checklist.py && python3 lib/chat.py
+cd ~/.openclaw/workspace/scan-ho-so && python3 scan_pipeline.py --self-test && python3 lib/diadia.py && python3 lib/checklist.py && python3 lib/chat.py
 # syntax check everything
 python3 -m py_compile ~/.openclaw/workspace/scan-ho-so/{telegram_listener,scan_pipeline}.py ~/.openclaw/workspace/scan-ho-so/lib/*.py
 
@@ -59,7 +60,7 @@ journalctl --user -u openclaw-gateway -n 50
 cd ~/.openclaw && git add -A && git status && git commit -m "..." && git push
 ```
 
-There is no test framework — the only automated checks are `scan_pipeline.py --self-test` (SOP-naming) and the `if __name__ == "__main__"` self-check blocks at the bottom of `lib/checklist.py` and `lib/chat.py`. Keep those passing and extend them when you change those modules.
+There is no test framework — the only automated checks are `scan_pipeline.py --self-test` (SOP-naming) and the `if __name__ == "__main__"` self-check blocks at the bottom of `lib/diadia.py`, `lib/checklist.py`, `lib/chat.py`. Keep those passing and extend them when you change those modules.
 
 ## Notes
 

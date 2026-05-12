@@ -344,7 +344,7 @@ def web_search(query: str, model: str | None = None, max_results: int | None = N
 
 
 # ===========================================================================
-# Prompt + trả lời (CHAT_MODEL; NEED_FILE = đọc sâu 1 file; NEED_WEB = tra cứu ngoài)
+# Prompt + trả lời (CHAT_MODEL; NEED_FILE = đọc sâu 1 file · NEED_ADDR = tra địa giới hành chính · NEED_WEB = tra ngoài · NEED_RENAME = đổi tên file)
 # ===========================================================================
 _OFFICER_SYSTEM = """Bạn là một viên chức thẩm định hồ sơ visa Canada (visa officer) chuyên nghiệp, đang HỖ
 TRỢ NHÂN VIÊN xử lý hồ sơ về MỘT khách hàng cụ thể (thông tin dưới đây). Trả lời bằng tiếng Việt.
@@ -371,26 +371,36 @@ PHONG CÁCH BẮT BUỘC:
   (link thư mục Drive của hồ sơ này: {{DRIVE_LINK}}).
 - Mọi mốc thời gian / hạn → tính theo HÔM NAY = {{TODAY}} (dd/mm/yyyy).
 
-CÓ BA CƠ CHẾ ĐẶC BIỆT (mỗi cái = câu trả lời CHỈ gồm DUY NHẤT một dòng đúng cú pháp; cơ chế 1-2 chỉ dùng khi
-THẬT sự cần để trả lời CHÍNH XÁC — dữ liệu hiện có đã đủ thì TRẢ LỜI LUÔN, đừng yêu cầu tra thêm; cơ chế 3
-dùng khi nhân viên yêu cầu đổi tên):
+CÓ BỐN CƠ CHẾ ĐẶC BIỆT (mỗi cái = câu trả lời CHỈ gồm DUY NHẤT một dòng đúng cú pháp; chỉ dùng khi THẬT sự
+cần — dữ liệu hiện có đã đủ thì TRẢ LỜI LUÔN, đừng yêu cầu tra thêm):
 1) ĐỌC SÂU MỘT FILE — danh sách giấy tờ trong hồ sơ (tên file): {{DOC_LIST}}. Nếu cần đọc NGUYÊN VĂN /
    chi tiết sâu hơn của ĐÚNG MỘT giấy tờ (mà phần tóm tắt + trích xuất bên dưới KHÔNG đủ):
    NEED_FILE: <tên file y hệt trong danh sách trên>
-2) TRA CỨU NGOÀI — nếu cần thông tin KHÔNG có trong hồ sơ (vd: một xã/phường/đơn vị hành chính cũ có thật
-   sự được sáp nhập/đổi tên không sau cải cách hành chính ngày 12/06/2025; một quy định/biểu mẫu mới; …):
+2) ĐỊA GIỚI HÀNH CHÍNH (cải cách 2025) — câu hỏi xã/phường/huyện/tỉnh CŨ↔MỚI (vd "phường X có bị sáp nhập
+   không / địa chỉ … giờ thuộc đâu / xã A huyện B tỉnh C nay là gì"): tra BẢNG CHÍNH THỨC, KHÔNG đoán:
+   NEED_ADDR: <tên đơn vị hoặc địa chỉ cần tra (kèm tên tỉnh nếu biết)>
+3) TRA CỨU NGOÀI — chỉ khi cần thông tin KHÔNG có trong hồ sơ và KHÔNG phải địa giới hành chính (vd quy
+   định / biểu mẫu mới…):
    NEED_WEB: <truy vấn tìm kiếm ngắn gọn, tiếng Việt>
-3) ĐỔI TÊN FILE — nếu nhân viên YÊU CẦU đổi tên một giấy tờ trong hồ sơ (vd "đổi tên file X thành Y",
-   "sửa tên thành ...", "file này phải tên là ..."):
+4) ĐỔI TÊN FILE — nếu nhân viên YÊU CẦU đổi tên một giấy tờ (vd "đổi tên file X thành Y", "sửa tên thành …"):
    NEED_RENAME: <tên file hiện tại y hệt trong danh sách giấy tờ> => <tên file mới như nhân viên muốn>
    KHÔNG tự đổi khi nhân viên không yêu cầu rõ. Bot sẽ hỏi nhân viên xác nhận trước khi đổi.
-Trong cả ba trường hợp: KHÔNG thêm lời dẫn/giải thích nào khác — bot sẽ xử lý rồi phản hồi/hỏi bạn lại.
-KHÔNG dùng NEED_WEB cho thông tin đã có trong hồ sơ, cũng KHÔNG dùng cho câu hỏi ngoài lề (thời tiết, tin
-tức chung… — những câu đó vẫn từ chối như quy định ở trên)."""
+Trong mọi trường hợp: KHÔNG thêm lời dẫn/giải thích nào khác — bot sẽ xử lý rồi phản hồi/hỏi bạn lại.
+KHÔNG dùng các cơ chế này cho câu hỏi ngoài lề (thời tiết, tin tức chung… — những câu đó vẫn từ chối như quy định ở trên)."""
 
 _NEED_FILE_RE = re.compile(r"^\s*NEED_FILE\s*:\s*(.+?)\s*$", re.IGNORECASE)
 _NEED_WEB_RE = re.compile(r"^\s*NEED_WEB\s*:\s*(.+?)\s*$", re.IGNORECASE)
+_NEED_ADDR_RE = re.compile(r"^\s*NEED_ADDR\s*:\s*(.+?)\s*$", re.IGNORECASE)
 _NEED_RENAME_RE = re.compile(r"^\s*NEED_RENAME\s*:\s*(.+?)\s*=>\s*(.+?)\s*$", re.IGNORECASE)
+
+
+def _diadia():
+    """Import lib.diadia robustly (works as a package and when chat.py is run standalone)."""
+    try:
+        from . import diadia as _dd  # type: ignore
+    except (ImportError, ValueError):
+        import diadia as _dd  # lib/ on sys.path (standalone self-check)
+    return _dd
 _AFFIRM_RE = re.compile(r"^\s*(ok(ie|ay)?|đồng\s*ý|đúng(\s*r[ồô]i)?|ph[ảa]i\s*r[ồô]i|có|ừm?|ờ+|uh+|yes|y|"
                         r"đư[ợơ]c|đư[ợơ]c\s*r[ồô]i|ch[ốô]t|chu[ẩa]n|x[áa]c\s*nh[ậâ]n)\s*[.!]*\s*$", re.IGNORECASE)
 _NEG_RE = re.compile(r"^\s*(hu[ỷy](\s*b[ỏo])?|kh[ôo]ng|ko|th[ôo]i|b[ỏo]|kh[ỏo]i|cancel|no)\s*[.!]*\s*$", re.IGNORECASE)
@@ -423,6 +433,56 @@ def parse_need_rename(text: str):
     old = m.group(1).strip().strip("'\"`").strip()
     new = m.group(2).strip().strip("'\"`").strip()
     return (old, new) if old and new else None
+
+
+def parse_need_addr(text: str):
+    """'NEED_ADDR: <đơn vị / địa chỉ>' (1 dòng) → query string, else None."""
+    t = (text or "").strip()
+    if "\n" in t:
+        return None
+    m = _NEED_ADDR_RE.match(t)
+    return m.group(1).strip().strip("'\"`").strip() if m else None
+
+
+def addr_lookup_text(query: str) -> str:
+    """Tra `query` trong bảng địa giới hành chính cũ↔mới (lib.diadia) → đoạn văn bản cho LLM dùng."""
+    try:
+        dd = _diadia()
+    except Exception as e:  # noqa: BLE001
+        return f"(không tra được bảng địa giới: {type(e).__name__}: {e})"
+    q = str(query or "").strip()
+    if not q:
+        return "(truy vấn rỗng)"
+    lines = [f"TRA CỨU «{q}» trong bảng địa giới hành chính chính thức (cải cách 2025; sáp nhập tỉnh hiệu lực "
+             f"12/06/2025, sáp nhập xã 01/07/2025) — KẾT QUẢ DETERMINISTIC, coi là chính xác:"]
+    try:
+        info = dd.commune_merge_info(q)
+        if info.get("found"):
+            if info.get("new_ward") and info.get("new_province"):
+                lines.append(f"  • {info['ghi_chu']}")
+            elif info.get("candidates"):
+                lines.append(f"  • {info['ghi_chu']}")
+            else:
+                lines.append(f"  • {info['ghi_chu']}")
+        else:
+            lines.append(f"  • (xã/phường) {info.get('ghi_chu','không có trong bảng')}")
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"  • (lỗi tra cấp xã: {type(e).__name__})")
+    try:
+        r = dd.resolve_address(q)
+        if r.get("tinh_moi"):
+            moi = (f"{r['xa_moi']}, {r['tinh_moi']}" if r.get("xa_moi") else r["tinh_moi"])
+            lines.append(f"  • Phân giải địa chỉ: nay thuộc «{moi}»"
+                         f"{' (chuỗi dùng tên trước cải cách)' if (r.get('is_old_province') or r.get('is_old_ward')) else ''}"
+                         f" — độ tin: {r.get('confidence')}"
+                         + (f". Lưu ý: {r['ghi_chu']}" if r.get("ghi_chu") else ""))
+            if r.get("candidates"):
+                lines.append("    ứng viên cấp xã: " + "; ".join(f"{c['new_ward']}, {c['new_province']}" for c in r["candidates"][:8]))
+        elif r.get("confidence") == "unknown":
+            lines.append("  • Không nhận ra cấp tỉnh trong chuỗi — có thể sai tên / cần kiểm tra văn bản chính thức.")
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"  • (lỗi phân giải địa chỉ: {type(e).__name__})")
+    return "\n".join(lines)
 
 
 def is_affirmative(text: str) -> bool:
@@ -630,10 +690,18 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
                                    case_folder_id=case_meta.get("folder_id", ""))
                 return f'Xác nhận đổi tên: "{old}" → "{new}"? (trả lời "ok" để đổi, "huỷ" để bỏ)'
             return do_rename(case_meta.get("folder_id", ""), fid, old, new, drive_id)
-        # ── Tối đa 1 vòng tra thêm: NEED_FILE (đọc sâu 1 file) hoặc NEED_WEB (tra cứu ngoài) ──
+        # ── Tối đa 1 vòng tra thêm: NEED_ADDR (bảng địa giới) / NEED_FILE (đọc sâu 1 file) / NEED_WEB (tra ngoài) ──
         wfile = _is_need_file(text)
         wweb = _is_need_web(text)
-        if wfile is not None:
+        waddr = parse_need_addr(text)
+        if waddr is not None:
+            ans_addr = await asyncio.to_thread(addr_lookup_text, waddr)
+            extra = f"--- TRA CỨU ĐỊA GIỚI HÀNH CHÍNH (bảng chính thức, deterministic — coi là chính xác) cho «{waddr}» ---\n{ans_addr}\n"
+            print(f"chat: NEED_ADDR -> tra «{waddr}»", flush=True)
+            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(extra)) or "").strip()
+            if parse_need_addr(text) is not None or _is_need_file(text) is not None or _is_need_web(text) is not None:
+                text = "Cần kiểm tra thêm — chưa đủ căn cứ để kết luận chắc chắn."
+        elif wfile is not None:
             dn = _match_doc_name(wfile, doc_names)
             if dn:
                 link = (ctx.get("name_to_link") or {}).get(dn, "")
@@ -770,12 +838,12 @@ if __name__ == "__main__":
           "| web_ttl:", CHAT_WEB_TTL, "| cooldown:", CHAT_USER_COOLDOWN, "| concurrency:", CHAT_CONCURRENCY)
     for fn in (build_case_context, get_case_context, invalidate_case_cache, answer_question, get_file_fulltext,
                web_search, cases_for_staff, pick_case_for_dm, group_history, dm_session, check_cooldown, linkify_answer,
-               _strip_markdown_plain, parse_need_rename, is_affirmative, is_negative, set_pending_rename,
-               pop_pending_rename, _sanitize_new_name, do_rename):
+               _strip_markdown_plain, parse_need_rename, parse_need_addr, addr_lookup_text, is_affirmative, is_negative,
+               set_pending_rename, pop_pending_rename, _sanitize_new_name, do_rename):
         assert callable(fn), fn
     _sys_lc = _OFFICER_SYSTEM.lower()
     assert "visa officer" in _sys_lc and "không nịnh" in _sys_lc and "need_file" in _sys_lc and "need_web" in _sys_lc
-    assert "need_rename" in _sys_lc and "tên file" in _sys_lc and "{{DRIVE_LINK}}" in _OFFICER_SYSTEM
+    assert "need_rename" in _sys_lc and "need_addr" in _sys_lc and "tên file" in _sys_lc and "{{DRIVE_LINK}}" in _OFFICER_SYSTEM
     s = (_OFFICER_SYSTEM.replace("{{TODAY}}", "12/05/2026")
          .replace("{{DRIVE_LINK}}", "https://drive.google.com/x").replace("{{DOC_LIST}}", "a.pdf, b.pdf"))
     assert "{{" not in s and "12/05/2026" in s and "a.pdf, b.pdf" in s and "drive.google.com/x" in s
@@ -826,6 +894,10 @@ if __name__ == "__main__":
     assert parse_need_rename("NEED_RENAME: A.pdf => B.pdf") == ("A.pdf", "B.pdf")
     assert parse_need_rename("NEED_RENAME: `Khac-Mo.jpg` => 'ID photo-Mo.jpg'") == ("Khac-Mo.jpg", "ID photo-Mo.jpg")
     assert parse_need_rename("trả lời bình thường") is None and parse_need_rename("NEED_RENAME: A\nB => C") is None
+    assert parse_need_addr("NEED_ADDR: Phường Vĩnh Tân, TP Vinh, Nghệ An") == "Phường Vĩnh Tân, TP Vinh, Nghệ An"
+    assert parse_need_addr("trả lời bình thường") is None and parse_need_addr("NEED_ADDR: a\nb") is None
+    _alt = addr_lookup_text("Xã Hợp Thịnh, Huyện Tam Dương, Tỉnh Vĩnh Phúc")
+    assert "Phú Thọ" in _alt and "Vĩnh Phúc" in _alt   # tỉnh cũ → mới được nhận diện
     assert is_affirmative("ok") and is_affirmative("Đồng ý.") and is_affirmative("xác nhận") and not is_affirmative("ok đổi đi nhé")
     assert is_negative("huỷ") and is_negative("không") and not is_negative("không sao")
     assert _sanitize_new_name("ID photo/Mo", "Khac-Mo.jpg") == "ID photo-Mo.jpg"

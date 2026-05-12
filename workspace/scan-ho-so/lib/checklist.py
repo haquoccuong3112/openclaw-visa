@@ -268,11 +268,17 @@ giữa các giấy tờ, và xuất báo cáo theo đúng format yêu cầu.
    Hiển thị rõ phép tính (VD: "Cấp 22/01/2026, đến {{TODAY}} = 3 tháng 20
    ngày, còn hạn 2 tháng 10 ngày").
 
-4. **CẢNH BÁO ĐỊA GIỚI HÀNH CHÍNH**: Từ 12/06/2025, Việt Nam chỉ còn 34 đơn
-   vị hành chính cấp tỉnh (28 tỉnh + 6 thành phố trực thuộc TW).
-   - Giấy tờ cấp SAU 12/06/2025 mà ghi tên tỉnh cũ (đã sáp nhập) → BÁO LỖI
-   - Giấy tờ cấp TRƯỚC 12/06/2025 ghi tên tỉnh cũ → HỢP LỆ, ghi chú "đã sáp nhập"
-   Danh sách 34 đơn vị hiện hành:
+4. **CẢNH BÁO ĐỊA GIỚI HÀNH CHÍNH (cải cách 2025)**: Từ 12/06/2025 chỉ còn 34 đơn vị
+   cấp tỉnh (28 tỉnh + 6 TP trực thuộc TW); từ 01/07/2025 các xã/phường cũng đã sáp nhập (≈10.000 → 3.321).
+   - Hồ sơ có sẵn trường **`_dia_gioi`** = KẾT QUẢ TRA CỨU DETERMINISTIC từ bảng địa giới chính thức (cũ↔mới,
+     tới cấp xã). **COI ĐÓ LÀ GROUND-TRUTH — KHÔNG tự dò lại, KHÔNG đoán.** Cách dùng:
+     (a) hai địa chỉ TEXT khác nhau nhưng `_dia_gioi.doi_chieu` ghi `same` (hoặc cùng `don_vi_moi`) → **KHÔNG báo
+         mâu thuẫn** trong PHẦN 3 (chỉ là tên trước/sau cải cách);
+     (b) giấy cấp SAU mốc cải cách mà ghi đơn vị `la_ten_cu=true` (đã sáp nhập) → BÁO LỖI ở PHẦN 3;
+     (c) giấy cấp TRƯỚC mốc đó → HỢP LỆ, ghi chú "đã sáp nhập thành …";
+     (d) `do_tin`=`unknown`/`fuzzy` (bảng chưa phủ hết / chuỗi mờ) → tự đánh giá thêm như bình thường.
+     (Nếu hồ sơ KHÔNG có `_dia_gioi` thì tự kiểm dựa trên danh sách dưới như trước.)
+   Danh sách 34 đơn vị cấp tỉnh hiện hành:
    {{PROVINCES}}
 
 # QUY TRÌNH KIỂM TRA (Thực hiện tuần tự, không bỏ bước)
@@ -681,7 +687,120 @@ def _write_google_doc(case_folder_id: str, name: str, md_text: str, drive_id: st
 
 
 # ===========================================================================
-# Orchestrator (≈ process_lmia_dossier): dataset → tầng 1 → tầng 2 → Google Doc
+# Địa giới hành chính: tra cứu deterministic (lib.diadia) → gắn vào hồ sơ cho tầng 2
+# ===========================================================================
+_ADDR_KEYS = ("noi_thuong_tru", "noi_o_hien_tai", "que_quan", "noi_sinh", "dia_chi", "dia_chi_thuong_tru")
+
+
+def _diadia():
+    """Import lib.diadia robustly (works both as a package and when checklist.py is run standalone)."""
+    try:
+        from . import diadia as _dd  # type: ignore
+    except (ImportError, ValueError):
+        import diadia as _dd  # lib/ on sys.path (standalone self-check)
+    return _dd
+
+
+def _gather_addresses(dataset: list, profile) -> list[tuple]:
+    """[(nhãn nguồn, chuỗi địa chỉ thô), …] — gom từ profile (tầng 1) + `du_lieu`/`key_fields` mỗi file; dedup."""
+    items = []
+    if isinstance(profile, dict):
+        pi = profile.get("personal_info") or {}
+        ct = profile.get("residence_ct07") or {}
+        for src, k in (("giấy tờ tuỳ thân — thường trú", "permanent_address"),
+                       ("giấy tờ tuỳ thân — nơi ở hiện tại", "current_address"),
+                       ("nơi sinh (khai sinh / HC / CCCD)", "place_of_birth")):
+            v = (pi.get(k) or "").strip()
+            if v:
+                items.append((src, v))
+        for src, k in (("CT07 — thường trú", "permanent_address"), ("CT07 — nơi ở hiện tại", "current_address")):
+            v = (ct.get(k) or "").strip()
+            if v:
+                items.append((src, v))
+    for d in (dataset or []):
+        loai = d.get("loai") or d.get("tag") or "?"
+        for bag in (d.get("du_lieu"), d.get("key_fields")):
+            if not isinstance(bag, dict):
+                continue
+            for k in _ADDR_KEYS:
+                v = bag.get(k)
+                if isinstance(v, str) and v.strip() and len(v.strip()) > 4:
+                    items.append((f"{loai} — {k}", v.strip()))
+    try:
+        _dd = _diadia()
+    except Exception:
+        return items[:12]
+    seen, out = set(), []
+    for label, raw in items:
+        f = _dd._fold(raw)
+        if not f or f in seen:
+            continue
+        seen.add(f)
+        out.append((label, raw))
+        if len(out) >= 12:
+            break
+    return out
+
+
+def build_dia_gioi(dataset: list, profile) -> dict | None:
+    """Tra cứu địa giới (lib.diadia) cho mọi địa chỉ trong hồ sơ → block ground-truth cho tầng 2.
+    Trả None nếu không có địa chỉ nào / lib.diadia không nạp được. Không bao giờ raise (wrap ở caller)."""
+    try:
+        _dd = _diadia()
+    except Exception as e:  # noqa: BLE001
+        return {"_help": "lib.diadia không nạp được — bỏ qua tra cứu địa giới deterministic", "loi": str(e)}
+    addrs = _gather_addresses(dataset, profile)
+    if not addrs:
+        return None
+    resolved = []
+    for label, raw in addrs:
+        try:
+            r = _dd.resolve_address(raw)
+        except Exception:
+            continue
+        if r:
+            resolved.append((label, raw, r))
+    if not resolved:
+        return None
+    dia_chi = []
+    for label, raw, r in resolved:
+        if r["xa_moi"]:
+            moi = f"{r['xa_moi']}, {r['tinh_moi']}"
+        elif r["candidates"]:
+            moi = f"{r['tinh_moi']} (cấp xã: nhiều ứng viên — {len(r['candidates'])})"
+        else:
+            moi = r["tinh_moi"] or "(không xác định)"
+        dia_chi.append({"nguon": label, "goc": raw, "don_vi_moi": moi,
+                        "la_ten_cu": bool(r["is_old_province"] or r["is_old_ward"]),
+                        "do_tin": r["confidence"], "ghi_chu": r["ghi_chu"]})
+    doi_chieu = []
+    for i in range(len(resolved)):
+        for j in range(i + 1, len(resolved)):
+            if len(doi_chieu) >= 30:
+                break
+            la, ra_, _ = resolved[i]
+            lb, rb_, _ = resolved[j]
+            try:
+                v, why = _dd.same_place(ra_, rb_)
+            except Exception:
+                continue
+            doi_chieu.append({"a": la, "b": lb, "ket_qua": v, "ghi_chu": why})
+        if len(doi_chieu) >= 30:
+            break
+    return {
+        "_help": ("Kết quả TRA CỨU DETERMINISTIC từ bảng địa giới hành chính chính thức 2025 (data/admin/, tới cấp "
+                  "xã/phường). COI LÀ GROUND-TRUTH — đừng tự dò lại / đừng đoán. (a) hai địa chỉ TEXT khác nhau nhưng "
+                  "`doi_chieu`=`same` hoặc cùng `don_vi_moi` → KHÔNG phải mâu thuẫn (chỉ tên trước/sau cải cách); "
+                  "(b) giấy cấp SAU mốc cải cách (tỉnh 12/06/2025, xã 01/07/2025) mà ghi đơn vị `la_ten_cu=true` → "
+                  "BÁO LỖI ở PHẦN 3; (c) cấp TRƯỚC mốc → HỢP LỆ, ghi chú 'đã sáp nhập'; (d) `do_tin`=`unknown`/`fuzzy` "
+                  "→ tự đánh giá thêm như bình thường (bảng có thể chưa phủ hết)."),
+        "dia_chi_da_tra": dia_chi,
+        "doi_chieu": doi_chieu,
+    }
+
+
+# ===========================================================================
+# Orchestrator (≈ process_lmia_dossier): dataset → tầng 1 → (địa giới) → tầng 2 → Google Doc
 # ===========================================================================
 def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
                   batch_items: list | None = None, today: str | None = None,
@@ -713,6 +832,17 @@ def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
         eval_input = prof
         extract_model = CHECKLIST_EXTRACT_MODEL
         profile_out = prof
+
+    # --- Địa giới hành chính: tra cứu deterministic (cũ↔mới, tới cấp xã) → gắn vào hồ sơ làm ground-truth ---
+    try:
+        _dg = build_dia_gioi(dataset, profile_out)
+        if _dg:
+            if isinstance(eval_input, dict):
+                eval_input["_dia_gioi"] = _dg          # cùng object với profile_out khi tầng 1 OK
+            else:
+                eval_input = list(eval_input) + [{"_dia_gioi": _dg}]
+    except Exception as e:  # noqa: BLE001
+        print(f"checklist: tra cứu địa giới (_dia_gioi) lỗi — bỏ qua: {type(e).__name__}: {e}", flush=True)
 
     # --- Tầng 2: đánh giá business-logic (model reasoning) → báo cáo Markdown -
     res = evaluate_profile_logic(eval_input, applicant, today, coverage, model=model, n_docs=n_docs)
@@ -789,8 +919,16 @@ if __name__ == "__main__":
     assert _i3b["applicable"] is True and _i3b["present"] is True
     print("coverage:", cov["have"], "/", cov["required"], "| missing:", len(cov["missing"]), "mục")
     p = _build_prompt("12/05/2026", "Nguyen Van Test", cov)
-    assert "VAI TRÒ" in p and "PHẦN 4" in p and "12/05/2026" in p and "Nguyen Van Test" in p and "{{" not in p and "CHECKLIST HỒ SƠ FARM" in p
+    assert "VAI TRÒ" in p and "PHẦN 4" in p and "12/05/2026" in p and "Nguyen Van Test" in p and "{{" not in p and "CHECKLIST HỒ SƠ FARM" in p and "_dia_gioi" in p
     print("prompt len:", len(p))
+    # địa giới: build_dia_gioi qua lib.diadia
+    _dg = build_dia_gioi(
+        [{"loai": "CCCD", "ten": "x", "du_lieu": {"noi_thuong_tru": "Phường Liên Bảo, TP Vĩnh Yên, Tỉnh Vĩnh Phúc"}},
+         {"loai": "XNCT", "ten": "y", "du_lieu": {"noi_thuong_tru": "..., Phú Thọ"}}],
+        {"personal_info": {"permanent_address": "Phường Liên Bảo, TP Vĩnh Yên, Tỉnh Vĩnh Phúc"}})
+    assert _dg and _dg.get("dia_chi_da_tra") and any(x.get("la_ten_cu") for x in _dg["dia_chi_da_tra"])
+    assert _dg.get("doi_chieu") and any(x["ket_qua"] == "same" for x in _dg["doi_chieu"])
+    print("dia_gioi: addrs", len(_dg["dia_chi_da_tra"]), "| doi_chieu", len(_dg["doi_chieu"]))
     assert should_run_checklist({"items": [{"tag": "CCCD"}]}) is True
     assert should_run_checklist({"items": [{"tag": "Khac"}]}) is False
     md = render_doc_md("## 📋 BÁO CÁO THẨM ĐỊNH HỒ SƠ\n**Khách hàng:** Test\n\n## ⚠️ PHẦN 3: ...\n\n## 📌 PHẦN 4: TÓM TẮT & KHUYẾN NGHỊ\n- **Tình trạng tổng thể:** ✅ Sẵn sàng nộp",

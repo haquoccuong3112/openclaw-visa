@@ -26,8 +26,14 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   - `drive_helpers.py` — Google Drive API wrappers (folder cache; upload/list/find/delete/rename/replace).
     **All Drive calls run on the asyncio event loop, never in a thread** (the httplib2 client isn't thread-safe).
   - `google_clients.py` — Drive/Sheets API client init.
-- **`data/`** — config data: `provinces_34.json` (34 administrative units, effective 2025-06-12; used by
-  `checklist.py`), `customer-folder-structure.json` (reference: the 4 top folders + their subfolders).
+  - `diadia.py` — tra cứu địa giới hành chính VN cũ↔mới (cải cách 2025) — deterministic, đọc từ `data/admin/`:
+    `resolve_address(text)` · `same_place(a,b)` · `commune_merge_info(name)`. Dùng bởi `checklist.py` (gắn
+    `profile["_dia_gioi"]` làm ground-truth cho tầng 2) và `chat.py` (cơ chế `NEED_ADDR`). Không phải HTTP service.
+- **`data/`** — config data: `provinces_34.json` (34 đơn vị cấp tỉnh + map tỉnh cũ→mới + ngày hiệu lực; dùng bởi
+  `checklist.py`), `customer-folder-structure.json` (tham khảo: 4 thư mục top + thư mục con), và
+  **`data/admin/`** — bảng địa giới hành chính cho `diadia.py`: `province_new.json` (34 tỉnh), `ward_new.json`
+  (~3.321 xã/phường), `old_to_new_wards.json` (10.358 dòng map xã cũ→mới, từ `admin_mapping_old_to_new.xlsx`),
+  `_convert_xlsx.py` + `SOURCES.md` (nguồn: VietMap — xem `SOURCES.md`).
 - **`docs/`** — domain notes: `VISA_CANADA_BOT.md`, `visa_canada_sop_raw.md` (the ALLY FARM checklist + naming SOP).
 - **`archive/`** — `run_sop_v2.py`, an old one-off dev script (superseded by `scan_pipeline.py` / `telegram_listener.py`); kept for reference, not run.
 - **`donghanhbot.service`** — copy of the systemd unit (active copy is `/etc/systemd/system/donghanhbot.service`; keep both in sync, `daemon-reload` after editing the active one).

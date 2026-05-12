@@ -140,8 +140,18 @@ to keep cost down:
 - This step is wrapped — a thẩm định failure **never** affects OCR/upload; it just records
   `"checklist": {"ran": false, "error": ...}`.
 
+**Địa giới hành chính (cải cách 2025)**: trước Stage-2, `run_and_write()` chạy `lib/diadia.py` (tra cứu
+DETERMINISTIC từ bảng cũ↔mới ở `data/admin/`, tới cấp xã/phường) trên mọi địa chỉ trong hồ sơ → gắn block
+**`_dia_gioi`** vào JSON hồ sơ (mỗi địa chỉ: `don_vi_moi`, `la_ten_cu`, `do_tin`, `ghi_chu`; và `doi_chieu`
+giữa các cặp địa chỉ: `same`/`different`/`unknown`). Stage-2 prompt coi `_dia_gioi` là **ground-truth** — KHÔNG
+tự dò lại: hai địa chỉ text khác nhau nhưng cùng đơn vị mới / `doi_chieu`=`same` → KHÔNG báo mâu thuẫn; giấy
+cấp sau mốc cải cách (tỉnh 12/06/2025, xã 01/07/2025) mà ghi đơn vị `la_ten_cu` → lỗi; `do_tin`=`unknown`/
+`fuzzy` → tự đánh giá thêm. Dữ liệu địa giới = repo VietMap (xem `data/admin/SOURCES.md`: dùng offline tự do;
+KHÔNG sửa-rồi-phát-hành-lại). `lib/diadia.py` cũng cấp `resolve_address` / `same_place` / `commune_merge_info`
+cho cơ chế chat `NEED_ADDR` (xem mục "Bot chat" dưới).
+
 Logic/prompts live in `~/.openclaw/workspace/scan-ho-so/lib/checklist.py` (single source of truth — don't reimplement;
-Stage-2 prompt = `CHECKLIST_PROMPT_TEMPLATE`, Stage-1 prompt = `_PROFILE_EXTRACT_SYSTEM`).
+Stage-2 prompt = `CHECKLIST_PROMPT_TEMPLATE`, Stage-1 prompt = `_PROFILE_EXTRACT_SYSTEM`; địa giới = `build_dia_gioi()`).
 Orchestrator = `run_and_write()` (≈ `process_lmia_dossier`). Flags: `--no-checklist` (skip it
 entirely), `--checklist-only` (skip enumerate/OCR/upload; just (re)run the 2-stage thẩm định for the
 case — `INPUT` not required, use `--from-registry` or `--case-folder-id` + `--applicant`; used by the
@@ -160,13 +170,16 @@ case's OCR'd sidecar `.json` data (each with its `drive_link` so the bot can han
 file) + the case-folder Drive link + the latest thẩm định Google Doc (exported as text) + the FARM điểm danh
 table + an **external web search** when needed (see below) — no re-OCR of the whole case, no extra sheets.
 The bot treats almost every staff message in this scope as case-related (only refuses clearly off-topic chitchat).
-**Models / tools**: chat/reasoning = `CHAT_MODEL` (default `google/gemini-2.5-pro`). Two opt-in follow-up
+**Models / tools**: chat/reasoning = `CHAT_MODEL` (default `google/gemini-2.5-pro`). Opt-in follow-up
 mechanisms (the model emits exactly one line, the bot acts, then re-asks — max 1 round each):
 (1) `NEED_FILE: <name>` → bot re-OCRs that one file with `CHAT_SCAN_MODEL` (`google/gemini-2.5-flash-lite`,
-cached 30') for verbatim/deep detail; (2) `NEED_WEB: <query>` → bot does an external web search via the
-OpenRouter web plugin on `CHAT_WEB_MODEL` (`google/gemini-2.5-flash`, `CHAT_WEB_MAX_RESULTS`=4, cached 60')
-— used e.g. to verify ward/commune mergers under the 12/06/2025 administrative reform that aren't in
-`provinces_34.json`. (NEED_WEB is NOT used for info already in the file, nor for off-topic chitchat.)
+cached 30') for verbatim/deep detail; (2) `NEED_ADDR: <đơn vị / địa chỉ>` → bot tra `lib/diadia.py` (bảng địa
+giới chính thức cũ↔mới, `data/admin/`) — dùng cho mọi câu hỏi "xã/phường/tỉnh X giờ là gì / có bị sáp nhập
+không" (deterministic, tức thì, không tốn token, KHÔNG dùng `NEED_WEB` cho việc này); (3) `NEED_WEB: <query>`
+→ external web search via the OpenRouter web plugin on `CHAT_WEB_MODEL` (`google/gemini-2.5-flash`,
+`CHAT_WEB_MAX_RESULTS`=4, cached 60') — only for genuinely-external info that ISN'T administrative-boundary
+(new regulations/forms…); (4) `NEED_RENAME: <cũ> => <mới>` → đổi tên file (hỏi xác nhận trước). (None of
+these for off-topic chitchat.)
 Case context cached per case (TTL 10', invalidated after each scan / `/check`); per-user cooldown
 `CHAT_USER_COOLDOWN` (3s) + `CHAT_CONCURRENCY` (4) semaphore. **Threading**: only the OpenRouter calls run
 in `asyncio.to_thread` (their own `httpx.Client`); all Google-Drive calls run on the event loop directly
