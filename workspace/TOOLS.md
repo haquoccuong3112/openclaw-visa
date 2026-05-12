@@ -41,9 +41,9 @@ Add whatever helps you do your job. This is your cheat sheet.
 
 ## Google Drive / Sheets
 
-- Scan hồ sơ service account credentials: `/home/cuong/google-service-account.json` (mode 600; do not print contents)
-- Env file: `/home/cuong/scan-ocr.env`
-- OpenRouter API key is stored in `/home/cuong/scan-ocr.env` (mode 600; do not print contents). `/models` and chat completion smoke tests passed on 2026-05-10.
+- Scan hồ sơ service account credentials: `/home/cuong/.openclaw/workspace/google-service-account.json` (mode 600; do not print contents)
+- Env file: `/home/cuong/.openclaw/workspace/scan-ocr.env`
+- OpenRouter API key is stored in `/home/cuong/.openclaw/workspace/scan-ocr.env` (mode 600; do not print contents). `/models` and chat completion smoke tests passed on 2026-05-10.
 - Project: `ally-visa-bot`
 - Service account email: `scan-ho-so-bot@ally-visa-bot.iam.gserviceaccount.com`
 - Drive API OAuth smoke test passed on 2026-05-10.
@@ -51,7 +51,7 @@ Add whatever helps you do your job. This is your cheat sheet.
 - OpenClaw working folder inside `Bot folder`: `OpenClaw` (`1VUpoBV3fAudONv5mMFXYguRThKfOLyz7`, driveId `0AIYOQpLqtMPvUk9PVA`).
 - Sheets write/read smoke test passed on 2026-05-10. Test sheet: `1EBjXQkieyAdEFRAdksJO42SeC17BmaG0sEpRFSzN_HM`.
 - Production/sample management Sheet: `ALLY - Quản Lý Hồ Sơ` (`1Qv4gdxNKgS7EsDPvInFsR1rnob_Qgv9HCaays_al6io`); bot can edit. Main tabs: `Cases`, `Documents`, `Activity Log`.
-- Document AI OCR processor: project `ally-visa-bot` / number `245613344727`, location `us`, processor `3183188b763e1843`, endpoint stored in `/home/cuong/scan-ocr.env`. OAuth and `processOnline` OCR smoke test passed on 2026-05-10.
+- Document AI OCR processor: project `ally-visa-bot` / number `245613344727`, location `us`, processor `3183188b763e1843`, endpoint stored in `/home/cuong/.openclaw/workspace/scan-ocr.env`. OAuth and `processOnline` OCR smoke test passed on 2026-05-10.
 - Creating new Sheets outside a shared/user folder under the service account fails because the service account has no Drive storage quota; create files inside the shared `Bot folder` or another folder shared with the service account as Editor.
 
 ## Related

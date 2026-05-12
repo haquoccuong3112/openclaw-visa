@@ -29,7 +29,7 @@ name), so a partial run can always be finished by running the same command again
    files into one directory). Note the absolute path.
 
 2. **Resolve the case Drive folder.** Each KH↔Pro group pair has a case folder
-   recorded in `~/scan-ho-so/group_registry.json` keyed by Telegram chat id
+   recorded in `~/.openclaw/workspace/scan-ho-so/group_registry.json` keyed by Telegram chat id
    (field `folder_id`, plus `applicant`, `visa`, `drive_link`). Either pass the
    chat id with `--from-registry`, or pass `--case-folder-id` + `--applicant`
    directly. If you can't determine the case folder, ask — do **not** guess and
@@ -38,7 +38,7 @@ name), so a partial run can always be finished by running the same command again
 3. **Run the pipeline:**
 
    ```bash
-   python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py "<ZIP_OR_DIR>" \
+   python3 ~/.openclaw/workspace/skills/scan-ho-so-pipeline/scripts/scan_zip.py "<ZIP_OR_DIR>" \
        --from-registry <TELEGRAM_CHAT_ID> \
        --manifest /tmp/scan_manifest.json
    ```
@@ -46,7 +46,7 @@ name), so a partial run can always be finished by running the same command again
    or, without the registry:
 
    ```bash
-   python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py "<ZIP_OR_DIR>" \
+   python3 ~/.openclaw/workspace/skills/scan-ho-so-pipeline/scripts/scan_zip.py "<ZIP_OR_DIR>" \
        --case-folder-id <DRIVE_FOLDER_ID> --applicant "Hoang Thi Mo" \
        --manifest /tmp/scan_manifest.json
    ```
@@ -84,7 +84,7 @@ name), so a partial run can always be finished by running the same command again
   `Personal Docs` / `Education` / `Asset` / `Employment`) → SOP filename
   (`<Tag>[ <relation>][ <index>]-<Subject>[_ENG].<ext>`, e.g.
   `CCCD-Hoang Thi Mo.pdf`). Naming/classification logic is the maintained
-  `~/scan-ho-so/lib/sop_naming.py` (single source of truth — don't reimplement).
+  `~/.openclaw/workspace/scan-ho-so/lib/sop_naming.py` (single source of truth — don't reimplement).
 - Other extensions (`.mov`, `.heic`, `.docx`, …) are still **uploaded**
   (classified from the filename, flagged `needs_review`) so nothing is lost.
 - Each file: up to `--retries` attempts with exponential backoff on any error.
@@ -130,14 +130,14 @@ to keep cost down:
 - This step is wrapped — a thẩm định failure **never** affects OCR/upload; it just records
   `"checklist": {"ran": false, "error": ...}`.
 
-Logic/prompts live in `~/scan-ho-so/lib/checklist.py` (single source of truth — don't reimplement;
+Logic/prompts live in `~/.openclaw/workspace/scan-ho-so/lib/checklist.py` (single source of truth — don't reimplement;
 Stage-2 prompt = `CHECKLIST_PROMPT_TEMPLATE`, Stage-1 prompt = `_PROFILE_EXTRACT_SYSTEM`).
 Orchestrator = `run_and_write()` (≈ `process_lmia_dossier`). Flags: `--no-checklist` (skip it
 entirely), `--checklist-only` (skip enumerate/OCR/upload; just (re)run the 2-stage thẩm định for the
 case — `INPUT` not required, use `--from-registry` or `--case-folder-id` + `--applicant`; used by the
 bot's `/check` command).
 
-## Bot chat — hỏi-đáp về hồ sơ KH (`~/scan-ho-so/lib/chat.py`)
+## Bot chat — hỏi-đáp về hồ sơ KH (`~/.openclaw/workspace/scan-ho-so/lib/chat.py`)
 
 The bot also answers staff questions about a case, **as a professional Canadian visa officer** — kỹ càng,
 chính xác, **không nịnh** — using Gemini. **Where**: in a case's **Pro group** (only when the message
@@ -174,7 +174,7 @@ point it at any folder id outside that sandbox.
 
 ## Environment
 
-Reads `~/scan-ocr.env` automatically: needs `OPENROUTER_API_KEY` (Gemini via
+Reads `~/.openclaw/workspace/scan-ocr.env` automatically: needs `OPENROUTER_API_KEY` (Gemini via
 OpenRouter) and `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON with
 Drive scope — the thẩm định step creates a Google Doc). Override
 the OCR model with `GEMINI_MODEL` (default `google/gemini-2.5-flash-lite`),
@@ -183,15 +183,15 @@ the thẩm định **Stage-1 extract** model with `CHECKLIST_EXTRACT_MODEL` (def
 (default `google/gemini-2.5-pro`; falls back to `CHECKLIST_FALLBACK_MODEL`, default
 `google/gemini-2.5-flash`, on a bad model id or transient error). Override
 library/env locations with `SCAN_HO_SO_DIR`, `SCAN_OCR_ENV`, `SHARED_DRIVE_ID`
-if needed. The checklist requires `~/scan-ho-so/lib/checklist.py` and (optionally)
-`~/scan-ho-so/provinces_34.json`. Python deps: `google-api-python-client`,
+if needed. The checklist requires `~/.openclaw/workspace/scan-ho-so/lib/checklist.py` and (optionally)
+`~/.openclaw/workspace/scan-ho-so/provinces_34.json`. Python deps: `google-api-python-client`,
 `google-auth`, `httpx` (already installed on this host).
 
 ## Quick check
 
 ```bash
-python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py --self-test
-python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py <some.zip> --dry-run --applicant "Test" --manifest /tmp/m.json
+python3 ~/.openclaw/workspace/skills/scan-ho-so-pipeline/scripts/scan_zip.py --self-test
+python3 ~/.openclaw/workspace/skills/scan-ho-so-pipeline/scripts/scan_zip.py <some.zip> --dry-run --applicant "Test" --manifest /tmp/m.json
 # re-run only the checklist for a case (no OCR/upload):
-python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py --checklist-only --from-registry <CHAT_ID> --manifest /tmp/m.json
+python3 ~/.openclaw/workspace/skills/scan-ho-so-pipeline/scripts/scan_zip.py --checklist-only --from-registry <CHAT_ID> --manifest /tmp/m.json
 ```

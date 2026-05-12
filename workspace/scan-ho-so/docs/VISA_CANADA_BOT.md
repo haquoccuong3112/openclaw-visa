@@ -26,7 +26,7 @@ Pro Bot supports Cường's company with Canada visa hồ sơ operations: intake
 7. Prepare final internal review summary before submission.
 
 ## Operating SOP
-Primary SOP file: `/home/cuong/visa_canada_sop_raw.md`.
+Primary SOP file: `/home/cuong/.openclaw/workspace/scan-ho-so/docs/visa_canada_sop_raw.md`.
 
 Current SOP focus:
 - Telegram case groups + internal DM workflow.

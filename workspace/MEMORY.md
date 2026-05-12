@@ -2,7 +2,7 @@
 
 ## Dong Hanh Bot Project (2026-05-11)
 - Bot: @donghanhprocessingbot | Token trong `scan-ocr.env`
-- Service: `donghanhbot.service` (systemd) | Code: `/home/cuong/scan-ho-so/telegram_listener.py`
+- Service: `donghanhbot.service` (systemd) | Code: `/home/cuong/.openclaw/workspace/scan-ho-so/telegram_listener.py`
 - Pipeline: Nhóm KH gửi file → OCR (Document AI) → Gemini classify → rename SOP → Drive → forward nhóm Pro
 - Tên nhóm KH: `{Tên KH} {Visa} - {Agent}` | Tên nhóm Pro: `DH Pro {Visa} - {Tên KH}`
 - Master Sheet: `1Qv4gdxNKgS7EsDPvInFsR1rnob_Qgv9HCaays_al6io`
