@@ -4,6 +4,7 @@
 # devices/, completions/, canvas/, tui/, tools/, ... — they're machine-local state.
 /*
 !/.gitignore
+!/CLAUDE.md
 !/workspace/
 
 # belt-and-suspenders for things under workspace/ (workspace/.gitignore also covers these):
