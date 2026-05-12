@@ -33,7 +33,7 @@ DOC_TYPE_PATTERNS: list[tuple[str, str, str]] = [
     (r"cu tru|xac nhan cu tru|xnct", "XNCT", "Personal Docs"),
     (r"ly lich tu phap|lltp|phieu ll", "LLTP", "Personal Docs"),
     (r"giay phep lai xe|gplx|bang lai", "GPLX", "Personal Docs"),
-    (r"anh the|hinh the|the\s*\d\s*x\s*\d|anh\s*\d\s*x\s*\d|anh\s*chan\s*dung|chan\s*dung\s*phong\s*tran|anh\s*ho\s*chieu|id\s*photo|passport\s*photo|portrait\s*photo", "Anh the", "Personal Docs"),
+    (r"anh the|hinh the|the\s*\d\s*x\s*\d|anh\s*\d\s*x\s*\d|anh\s*ho\s*chieu|id\s*photo|passport\s*photo", "Anh the", "Personal Docs"),
     (r"\bbhxh\b|bao hiem xa hoi", "BHXH", "Personal Docs"),
     (r"\bbhyt\b|bao hiem y te|the bao hiem y te", "BHYT", "Personal Docs"),
     (r"\biom\b", "IOM", "Personal Docs"),
@@ -148,7 +148,7 @@ FILENAME_HINTS: list[tuple[str, str, str]] = [
     (r"\bgkh\b|ket\s*hon|hon\s*thu", "GKH", "Personal Docs"),
     (r"\blltp\b|ly\s*lich\s*tu\s*phap", "LLTP", "Personal Docs"),
     (r"\bgplx\b|bang\s*lai|giay\s*phep\s*lai\s*xe", "GPLX", "Personal Docs"),
-    (r"\banh\s*the\b|id\s*photo|passport\s*photo|\bportrait\b|chan\s*dung|\b\d\s*x\s*\d\b", "Anh the", "Personal Docs"),
+    (r"\banh\s*the\b|id\s*photo|passport\s*photo|\bportrait\b|\b\d\s*x\s*\d\b", "Anh the", "Personal Docs"),
     (r"\bxnct\b|cu\s*tru", "XNCT", "Personal Docs"),
     (r"\biom\b", "IOM", "Personal Docs"),
     (r"\bsyll\b|so\s*yeu\s*ly\s*lich|thong\s*tin\s*ca\s*nhan|to\s*khai", "CV", "Personal Docs"),
@@ -192,6 +192,11 @@ def classify_doc_type(
         and re.search(r"\bcccd\b|can\s*cuoc|chung\s*minh|\bcmnd\b|thong\s*tin\s*ca\s*nhan", _g_hay)
     ):
         return Classification(tag="CV", folder="Personal Docs", confidence="medium", needs_review=True)
+    # Pass 0b: Gemini cờ đây là ảnh chân dung CHÍNH THỨC (ảnh thẻ / ảnh dán hồ sơ) → Anh the (mục 9 FARM) —
+    # do Gemini nhìn ảnh quyết định nên thắng cả pattern doc_type lẫn tên file. (Ảnh người làm việc/làm nông hay
+    # ảnh nhóm/gia đình thì la_anh_the=false → đi tiếp các pass dưới → "Anh-video lam nong" / "Anh gia dinh".)
+    if isinstance(extracted, dict) and extracted.get("la_anh_the"):
+        return Classification(tag="Anh the", folder="Personal Docs", confidence="medium", needs_review=False)
 
     is_unclear = (not raw_doc_type) or any(
         bad in (raw_doc_type or "").lower()
@@ -309,9 +314,11 @@ if __name__ == "__main__":
     assert classify_doc_type("Căn cước công dân", "tờ giấy có ô số CCCD", "CCCD-Hoang Thi Mo.jpg",
                              extracted={"la_to_khai": True}).tag == "CV"
     assert classify_doc_type("Thông tin gia đình", "khách tự ghi tay họ tên các thành viên", "CCCD-Hoang Thi Mo.jpg").tag == "CV"
-    # ảnh chân dung / ảnh thẻ 5x7 (phông trắng, 1 người) → "Anh the" (mục 9 FARM) — kể cả khi đang mang tên "Khac-…"
+    # ảnh thẻ 5x7 (ảnh dán hồ sơ, 1 người) → "Anh the" (mục 9 FARM); ảnh người làm nông → "Anh-video lam nong"; nhóm/tiệc → "Anh gia dinh"
     assert classify_doc_type("Ảnh thẻ 5x7", "ảnh chân dung phông trắng", "Khac-Hoang Thi Mo.jpg").tag == "Anh the"
-    assert classify_doc_type("Ảnh chân dung", "", "ID photo-Hoang Thi Mo.jpg").tag == "Anh the"
-    assert classify_doc_type("Hình ảnh", "", "Anh the-Hoang Thi Mo.jpg").tag == "Anh the"          # round-trip qua tên file
-    assert classify_doc_type("Ảnh chụp gia đình", "tiệc sinh nhật", "x.jpg").tag == "Anh gia dinh"  # không nuốt ảnh gia đình
+    assert classify_doc_type("Ảnh", "", "x.jpg", extracted={"la_anh_the": True}).tag == "Anh the"   # cờ Gemini
+    assert classify_doc_type("Ảnh chân dung", "", "ID photo-Hoang Thi Mo.jpg").tag == "Anh the"      # round-trip qua tên file
+    assert classify_doc_type("Hình ảnh", "", "Anh the-Hoang Thi Mo.jpg").tag == "Anh the"            # round-trip qua tên file
+    assert classify_doc_type("Ảnh chân dung người làm nông trong nhà kính", "đang chăm cây", "x.jpg").tag == "Anh-video lam nong"  # KHÔNG nuốt ảnh làm nông
+    assert classify_doc_type("Ảnh chụp gia đình", "tiệc sinh nhật", "x.jpg").tag == "Anh gia dinh"    # KHÔNG nuốt ảnh gia đình
     print("classify guards OK")

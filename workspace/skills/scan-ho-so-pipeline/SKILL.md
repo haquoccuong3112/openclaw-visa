@@ -95,8 +95,10 @@ name), so a partial run can always be finished by running the same command again
   > `Khac-<Họ Tên>.ext` nếu không hợp `CV`) — giữ đúng quy tắc `<Loại>-<Họ Tên>.ext`, đừng đặt tên tự do
   > kiểu "Thông tin cá nhân KH gửi.jpg". (`scan_pipeline.py` đã được chỉnh để Gemini + `classify_doc_type`
   > tự nhận diện tờ tự khai → `CV` với cờ ⚠️ needs_review, nhưng vẫn nên rà lại.)
-  > Một tấm **ảnh chân dung / ảnh thẻ của 1 người** (phông trắng/xanh, kiểu ảnh dán hồ sơ) là tag **`Anh the`**
-  > ("Ảnh thẻ 5x7" — mục 9 checklist FARM), KHÔNG phải `Khac`; ảnh chụp gia đình / nhóm người / tiệc → `Anh gia dinh`.
+  > Phân biệt ảnh: **ảnh chân dung CHÍNH THỨC kiểu ảnh dán hồ sơ/hộ chiếu** (1 người, đầu+vai, phông đơn sắc
+  > trắng/xanh, nhìn thẳng, không cảnh vật) → tag **`Anh the`** (mục 9 FARM "Ảnh thẻ 5x7"); **người đang làm việc /
+  > làm nông / ở vườn-ruộng-nhà kính** (dù thấy mặt) → `Anh-video lam nong` (mục 26); **ảnh nhiều người / gia đình /
+  > tiệc** → `Anh gia dinh` (mục 25). Gemini gắn cờ `extracted.la_anh_the` cho ảnh thẻ; `classify_doc_type` tin cờ đó.
 - Other extensions (`.mov`, `.heic`, `.docx`, …) are still **uploaded**
   (classified from the filename, flagged `needs_review`) so nothing is lost.
 - Each file: up to `--retries` attempts with exponential backoff on any error.
