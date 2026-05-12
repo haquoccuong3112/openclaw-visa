@@ -11,7 +11,8 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   `lib/chat.py`, and on-demand `/check` re-runs the thẩm định. Telegram messages use `parse_mode=HTML`
   (`send_html()` helper); the HTML is built by our code (`html.escape`), never by the LLM.
 - **`scan_pipeline.py`** — the unzip → Gemini-OCR → classify → SOP-rename → upload-to-Drive → AI-thẩm-định
-  pipeline, with a manifest covering every input file, per-file retries, idempotent re-runs. Run by the bot
+  pipeline. Gemini-OCR runs **in parallel** across files (`SCAN_OCR_WORKERS` threads, default 5); classify /
+  rename / Drive-upload / thẩm-định stay sequential. Manifest covers every input file; per-file retries; idempotent re-runs. Run by the bot
   (subprocess) and by the OpenClaw agent via the `../skills/scan-ho-so-pipeline/` skill (which is *just*
   `SKILL.md` — the procedure docs; the code is here). CLI: `python3 scan_pipeline.py <zip|dir>
   --from-registry <chat-id> --manifest <path>` (or `--case-folder-id … --applicant …`); `--dry-run`,

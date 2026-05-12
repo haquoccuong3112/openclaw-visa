@@ -12,8 +12,11 @@ Pipeline (the SOP "unzip → OCR/summarize → rename → upload to Drive" task)
      skipping macOS junk (__MACOSX, ._*). Unsupported extensions are NOT
      dropped — they are still uploaded (classified by filename only), so the
      count in == count out.
-  2. For each file: Gemini OCR/understanding → classify (SOP tag + 1 of 4 top
-     folders) → build the SOP-compliant filename.
+  2. Gemini OCR/understanding for every OCR-able file IN PARALLEL (a thread pool,
+     SCAN_OCR_WORKERS, default 5 — each file is one independent HTTP call); then,
+     per file (sequential): classify (SOP tag + 1 of 4 top folders) → build the
+     SOP-compliant filename. (Classify / dedup / Drive upload stay sequential —
+     the Drive client isn't thread-safe.)
   3. Upload the renamed file to its top folder under the case folder.
   4. Write a .json + .md sidecar into "_Bot OCR & Metadata".
   5. Retry each file up to --retries times with exponential backoff on ANY
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import json
 import os
 import re
@@ -72,6 +76,8 @@ SHARED_DRIVE_ID = os.environ.get("SHARED_DRIVE_ID", "0AIYOQpLqtMPvUk9PVA")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "google/gemini-2.5-flash-lite")
 TOP_FOLDERS = ["Personal Docs", "Education", "Asset", "Employment"]
 OCR_META_FOLDER = "_Bot OCR & Metadata"
+# Số file được Gemini OCR ĐỒNG THỜI (mỗi file 1 HTTP call độc lập). Phân loại + upload Drive + thẩm định vẫn tuần tự.
+OCR_WORKERS = max(1, int(os.environ.get("SCAN_OCR_WORKERS", "5")))
 
 # Extensions Gemini can read (OCR/understanding). Everything else is still
 # uploaded — just classified from the filename and flagged needs_review.
@@ -212,6 +218,43 @@ Nếu không đọc được file, vẫn trả JSON với summary_vi mô tả l�
         return {"doc_type": "", "person": [], "summary_vi": text[:300], "key_fields": {}, "extracted": {}}
 
 
+def _ocr_one_with_retry(path: Path, src_name: str, retries: int = 2) -> dict | None:
+    """Gọi Gemini OCR 1 file, retry vài lần. Trả dict (kể cả dict fallback rỗng) hoặc None nếu vẫn raise."""
+    last_err = None
+    for i in range(1, retries + 1):
+        try:
+            return gemini_classify_file(path, src_name)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if i < retries:
+                time.sleep(min(2 ** i, 15))
+    log(f"  OCR prefetch lỗi cho {src_name}: {type(last_err).__name__}: {last_err} — sẽ thử lại tuần tự ở process_one")
+    return None
+
+
+def ocr_prefetch(files: list, *, dry_run: bool, workers: int) -> dict:
+    """OCR ĐỒNG THỜI mọi file OCR-được trong batch → {src_name: gem(dict) | None}.
+    File không OCR được (ext lạ) hoặc khi --dry-run: bỏ qua (không thêm vào dict). 1 file lỗi không phá batch."""
+    todo = [(p, n) for (p, n) in files if (not dry_run) and p.suffix.lower() in OCR_EXT_MIME]
+    if not todo:
+        return {}
+    n_workers = max(1, min(workers, len(todo)))
+    log(f"OCR song song: {len(todo)} file, {n_workers} luồng …")
+    out: dict = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+        fut_to_name = {ex.submit(_ocr_one_with_retry, p, n): n for (p, n) in todo}
+        for fut in concurrent.futures.as_completed(fut_to_name):
+            name = fut_to_name[fut]
+            try:
+                out[name] = fut.result()
+            except Exception as e:  # noqa: BLE001 — không nên xảy ra (đã bọc bên trong), nhưng cho chắc
+                log(f"  OCR prefetch future lỗi cho {name}: {type(e).__name__}: {e}")
+                out[name] = None
+    ok = sum(1 for v in out.values() if isinstance(v, dict))
+    log(f"OCR song song xong: {ok}/{len(out)} ok" + ("" if ok == len(out) else f" ({len(out) - ok} sẽ thử lại tuần tự)"))
+    return out
+
+
 def subject_from_gemini(gem: dict, fallback: str) -> str:
     person = gem.get("person")
     if isinstance(person, list) and person:
@@ -242,7 +285,8 @@ def dedup_name(name_registry: dict, tag: str, subject_title: str, ext: str,
 # process one file (with retries)
 # ============================================================================
 def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: str,
-                case_id: str, retries: int, dry_run: bool, sop, name_registry: dict) -> dict:
+                case_id: str, retries: int, dry_run: bool, sop, name_registry: dict,
+                prefetched_gem: dict | None = None) -> dict:
     classify_doc_type, build_filename, detect_english, title_case_ascii = sop
     ext = path.suffix.lower()
     can_ocr = ext in OCR_EXT_MIME
@@ -253,7 +297,8 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
         try:
             gem: dict = {}
             if can_ocr and not dry_run:
-                gem = gemini_classify_file(path, src_name)
+                # dùng kết quả OCR đã prefetch song song nếu có; nếu prefetch lỗi (None) thì gọi lại tuần tự (có retry).
+                gem = prefetched_gem if isinstance(prefetched_gem, dict) else gemini_classify_file(path, src_name)
             if not isinstance(gem, dict):
                 gem = {"doc_type": "", "person": [], "summary_vi": str(gem)[:300], "key_fields": {}, "extracted": {}}
             gem.setdefault("key_fields", {})
@@ -391,6 +436,13 @@ def run_self_test() -> int:
     assert classify_doc_type("Ảnh chân dung", "", "ID photo-Mo.jpg").tag == "Anh the"
     assert classify_doc_type("Ảnh chân dung người làm nông trong nhà kính", "chăm cây", "x.jpg").tag == "Anh-video lam nong"
     assert classify_doc_type("Ảnh chụp gia đình", "tiệc sinh nhật", "x.jpg").tag == "Anh gia dinh"
+    # OCR song song: prefetch bỏ qua file ext-lạ / dry-run / list rỗng (không chạm API), process_one nhận prefetched_gem
+    import inspect as _inspect
+    assert callable(ocr_prefetch) and "prefetched_gem" in _inspect.signature(process_one).parameters
+    assert ocr_prefetch([], dry_run=False, workers=3) == {}
+    assert ocr_prefetch([(Path("/nope/a.docx"), "a.docx")], dry_run=False, workers=2) == {}
+    assert ocr_prefetch([(Path("/nope/a.jpg"), "a.jpg")], dry_run=True, workers=2) == {}
+    print(f"OCR_WORKERS={OCR_WORKERS} | ocr_prefetch OK")
     # checklist module sanity
     try:
         from lib import checklist as _ck
@@ -480,13 +532,16 @@ def main(argv=None) -> int:
             if total == 0:
                 log("nothing to do")
 
+        # OCR mọi file OCR-được ĐỒNG THỜI trước (Gemini call/file là độc lập); phần dưới (phân loại + upload + sidecar) vẫn tuần tự.
+        ocr_cache = ocr_prefetch(files, dry_run=args.dry_run, workers=OCR_WORKERS) if files else {}
+
         name_registry: dict = {}
         items = []
         for idx, (path, src_name) in enumerate(files, 1):
             log(f"[{idx}/{total}] {src_name}")
             it = process_one(path, src_name, case_folder_id=case_folder_id or "", applicant=applicant,
                              case_id=case_id, retries=args.retries, dry_run=args.dry_run, sop=sop,
-                             name_registry=name_registry)
+                             name_registry=name_registry, prefetched_gem=ocr_cache.get(src_name))
             status = it.get("status", "?")
             log(f"     -> {status}  {it.get('new_name', '')}")
             items.append(it)

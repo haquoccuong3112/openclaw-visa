@@ -82,7 +82,9 @@ name), so a partial run can always be finished by running the same command again
 
 - Walks `.zip` / directory **recursively**; skips only `__MACOSX/`, `._*`,
   `.DS_Store`. Everything else is processed.
-- `pdf/jpg/jpeg/png` → Gemini OCR/understanding → classify (SOP tag + one of
+- `pdf/jpg/jpeg/png` → Gemini OCR/understanding (run **in parallel** across files —
+  `SCAN_OCR_WORKERS` threads, default 5; classify + Drive upload + thẩm định stay
+  sequential) → classify (SOP tag + one of
   `Personal Docs` / `Education` / `Asset` / `Employment`) → SOP filename
   (`<Tag>[ <relation>][ <index>]-<Subject>[_ENG].<ext>`, e.g.
   `CCCD-Hoang Thi Mo.pdf`). Naming/classification logic is the maintained
