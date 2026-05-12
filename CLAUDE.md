@@ -61,6 +61,7 @@ There is no test framework — the only automated checks are the `if __name__ ==
 
 ## Notes
 
+- **When unsure about anything OpenClaw-related** — directory layout, the workspace, skills, `openclaw.json` config keys, the gateway, CLI commands, plugins, channels — check the official docs first: **https://docs.openclaw.ai** (the machine-readable index is at https://docs.openclaw.ai/llms.txt; the workspace concept specifically is at https://docs.openclaw.ai/concepts/agent-workspace). Don't guess about OpenClaw internals.
 - New files: `rm -f file && cat > file <<'EOF' … EOF` (recreate from scratch) is the preferred edit style for config/scripts here, not `sed`/`awk`.
 - Vietnamese is the working language for bot output and most code comments; keep it that way.
 - See `workspace/scan-ho-so/docs/VISA_CANADA_BOT.md` and `docs/visa_canada_sop_raw.md` for the domain (the ALLY FARM document checklist, naming SOP, Vietnamese administrative-boundary rules post-2025-06-12).
