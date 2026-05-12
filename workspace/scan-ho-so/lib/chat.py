@@ -210,7 +210,13 @@ def build_case_context(case_folder_id: str, applicant: str, drive_id) -> dict:
     cov = compute_coverage(dataset)
     report_text = _fetch_tham_dinh_doc(case_folder_id, applicant, drive_id)
     docs, name_to_link = _trim_for_chat(dataset)
-    return {"docs": docs, "name_to_link": name_to_link, "coverage": cov,
+    try:  # tra địa giới hành chính cũ↔mới cho mọi địa chỉ trong hồ sơ → ground-truth cho LLM (đỡ phải NEED_ADDR)
+        from .checklist import build_dia_gioi
+        dia_gioi = build_dia_gioi(dataset, None)
+    except Exception as e:  # noqa: BLE001
+        print(f"chat: build_dia_gioi lỗi: {type(e).__name__}: {e}", flush=True)
+        dia_gioi = None
+    return {"docs": docs, "name_to_link": name_to_link, "coverage": cov, "dia_gioi": dia_gioi,
             "report_text": report_text, "doc_names": [d["ten"] for d in docs if d["ten"]], "n_docs": len(dataset)}
 
 
@@ -360,6 +366,14 @@ PHONG CÁCH BẮT BUỘC:
   bên dưới), vd: theo CCCD-Hoang Thi Mo …, trên LLTP-Hoang Thi Mo ghi ….
 - CHỈ dựa trên DỮ LIỆU HỒ SƠ + BÁO CÁO THẨM ĐỊNH + (nếu có) NGUYÊN VĂN GIẤY TỜ / KẾT QUẢ TRA CỨU được cung
   cấp dưới đây. KHÔNG bịa, KHÔNG suy đoán. Thiếu dữ liệu → nói rõ "không có trong hồ sơ / chưa đọc được".
+- ĐỊA GIỚI HÀNH CHÍNH: phần "ĐỊA GIỚI HÀNH CHÍNH" bên dưới (nếu có) là kết quả tra cứu DETERMINISTIC từ bảng
+  chính thức 2025 (cũ↔mới, tới cấp xã/phường) — COI LÀ GROUND-TRUTH. Hai địa chỉ khác nhau chỉ vì tên TRƯỚC
+  vs SAU cải cách (`doi_chieu`=`same`, hoặc cùng `don_vi_moi`) thì KHÔNG phải mâu thuẫn — ĐỪNG gọi đó là "lỗi"
+  / "không khớp" / "cần đồng bộ". Nếu BÁO CÁO THẨM ĐỊNH (có thể tạo từ lần thẩm định CŨ, trước khi có bảng này)
+  coi cặp đó là mâu thuẫn nhưng phần ĐỊA GIỚI HÀNH CHÍNH cho thấy `same` → TIN phần ĐỊA GIỚI HÀNH CHÍNH; nói
+  rõ với nhân viên đây chỉ là tên trước/sau cải cách 2025 (nêu tên đơn vị MỚI), và gợi ý chạy lại /check để báo
+  cáo cập nhật. (Giấy cấp SAU mốc cải cách — tỉnh 12/06/2025, xã 01/07/2025 — mà còn ghi đơn vị `la_ten_cu=true`:
+  vẫn nên nhắc cập nhật theo tên mới.) `do_tin`=`unknown`/`fuzzy` → bảng chưa chắc phủ hết, tự đánh giá thêm.
 - TUYỆT ĐỐI không tiết lộ thông tin của bất kỳ khách hàng nào khác ngoài hồ sơ này.
 - Mặc định: gần như MỌI câu hỏi của nhân viên trong khung này đều LIÊN QUAN đến hồ sơ này — hãy cố trả lời
   theo hướng đó (kể cả câu nói tắt / mơ hồ / kèm yêu cầu phụ như "gửi link", "in ra", "tôi check lại"…).
@@ -642,6 +656,8 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
                  .replace("{{DRIVE_LINK}}", folder_link)
                  .replace("{{DOC_LIST}}", ", ".join(doc_names) if doc_names else "(chưa có giấy tờ nào)"))
     report_text = (ctx.get("report_text") or "")[:8000]
+    dg = ctx.get("dia_gioi") or None
+    dia_gioi_json = json.dumps(dg, ensure_ascii=False) if isinstance(dg, dict) and (dg.get("dia_chi_da_tra") or dg.get("doi_chieu")) else ""
     # KHÔNG đưa `drive_link` cho model — nó hay copy URL dài vào câu trả lời; bot tự gắn link từ name_to_link.
     docs_llm = [{k: v for k, v in (d or {}).items() if k != "drive_link"} for d in (ctx.get("docs") or [])]
     docs_json = json.dumps(docs_llm, ensure_ascii=False)
@@ -652,6 +668,7 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
         return (f"=== HỒ SƠ KHÁCH HÀNG: {applicant} | visa {visa} | agent {agent} ===\n"
                 f"--- {cov_block} ---\n"
                 f"--- DỮ LIỆU GIẤY TỜ ĐÃ OCR (JSON — mỗi phần tử 1 giấy tờ; ten/loai/nguoi/tom_tat/du_lieu/key_fields) ---\n{docs_json}\n"
+                + (f"--- ĐỊA GIỚI HÀNH CHÍNH (tra cứu DETERMINISTIC từ bảng chính thức 2025, cũ↔mới tới cấp xã/phường — GROUND-TRUTH; `doi_chieu`=`same` ⇒ hai địa chỉ chỉ khác do tên trước/sau cải cách, KHÔNG phải mâu thuẫn) ---\n{dia_gioi_json}\n" if dia_gioi_json else "")
                 + (f"--- BÁO CÁO THẨM ĐỊNH (trích) ---\n{report_text}\n" if report_text else "")
                 + extra
                 + f"--- LỊCH SỬ HỘI THOẠI GẦN ĐÂY ---\n{hist}\n"
@@ -844,6 +861,7 @@ if __name__ == "__main__":
     _sys_lc = _OFFICER_SYSTEM.lower()
     assert "visa officer" in _sys_lc and "không nịnh" in _sys_lc and "need_file" in _sys_lc and "need_web" in _sys_lc
     assert "need_rename" in _sys_lc and "need_addr" in _sys_lc and "tên file" in _sys_lc and "{{DRIVE_LINK}}" in _OFFICER_SYSTEM
+    assert "địa giới hành chính" in _sys_lc and "ground-truth" in _sys_lc and "doi_chieu" in _sys_lc  # mục địa-giới ground-truth
     s = (_OFFICER_SYSTEM.replace("{{TODAY}}", "12/05/2026")
          .replace("{{DRIVE_LINK}}", "https://drive.google.com/x").replace("{{DOC_LIST}}", "a.pdf, b.pdf"))
     assert "{{" not in s and "12/05/2026" in s and "a.pdf, b.pdf" in s and "drive.google.com/x" in s

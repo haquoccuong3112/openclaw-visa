@@ -20,9 +20,11 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   - `sop_naming.py` — doc-type classification + the SOP filename builder (`<Tag>[ relation][ idx]-<Subject>[_ENG].ext`).
   - `checklist.py` — the AI thẩm định: 2-stage LLM pipeline (cheap extract → reasoning) → a 4-part Markdown
     report written as a Google Doc, + the deterministic "điểm danh" FARM coverage (26 items / 18 required).
-  - `chat.py` — the Q&A "visa officer": `answer_question()` with `NEED_FILE` / `NEED_WEB` / `NEED_RENAME`
-    one-shot mechanisms; `linkify_answer()` (doc-name → clickable Telegram link); `do_rename()` (renames a
-    Drive file + its `.json`/`.md` sidecars).
+  - `chat.py` — the Q&A "visa officer": `answer_question()` with one-shot mechanisms `NEED_FILE` / `NEED_ADDR`
+    (tra `diadia.py`) / `NEED_WEB` / `NEED_RENAME`; the case context also carries a `_dia_gioi` block (đã tra
+    sẵn địa giới mọi địa chỉ trong hồ sơ → LLM coi là ground-truth, không gọi tên cũ↔mới của cùng nơi là "mâu
+    thuẫn"); `linkify_answer()` (doc-name → clickable Telegram link); `do_rename()` (renames a Drive file + its
+    `.json`/`.md` sidecars).
   - `drive_helpers.py` — Google Drive API wrappers (folder cache; upload/list/find/delete/rename/replace).
     **All Drive calls run on the asyncio event loop, never in a thread** (the httplib2 client isn't thread-safe).
   - `google_clients.py` — Drive/Sheets API client init.

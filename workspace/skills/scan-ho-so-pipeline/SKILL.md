@@ -168,7 +168,10 @@ ever loads that case's context); DM = the sender must be a known staff (Master S
 and only gets cases where `reg[pro_chat_id]["staff"]` contains them — other cases are refused. **Data**: the
 case's OCR'd sidecar `.json` data (each with its `drive_link` so the bot can hand staff the link to a specific
 file) + the case-folder Drive link + the latest thẩm định Google Doc (exported as text) + the FARM điểm danh
-table + an **external web search** when needed (see below) — no re-OCR of the whole case, no extra sheets.
+table + a **`_dia_gioi` block** (every address in the case already resolved old↔new via `lib/diadia.py` — the
+LLM treats it as ground-truth, so it won't call an old-name vs new-name of the *same* place a "contradiction"
+even when a stale báo cáo Doc still does) + an **external web search** when needed (see below) — no re-OCR of
+the whole case, no extra sheets.
 The bot treats almost every staff message in this scope as case-related (only refuses clearly off-topic chitchat).
 **Models / tools**: chat/reasoning = `CHAT_MODEL` (default `google/gemini-2.5-pro`). Opt-in follow-up
 mechanisms (the model emits exactly one line, the bot acts, then re-asks — max 1 round each):
