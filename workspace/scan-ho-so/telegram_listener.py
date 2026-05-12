@@ -49,14 +49,8 @@ from telegram.ext import (
     filters,
 )
 
-# ── Project lib ──────────────────────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).parent))
-from lib.google_clients import drive
-from lib.drive_helpers import get_or_create_folder
-from lib import chat as chatmod
-
-# ── Env ──────────────────────────────────────────────────────────────────────
-ENV_FILE = Path(__file__).parent.parent / "scan-ocr.env"
+# ── Env ── load scan-ocr.env BEFORE importing lib (lib modules read env vars at import time) ──
+ENV_FILE = Path(__file__).resolve().parent.parent / "scan-ocr.env"   # = <workspace>/scan-ocr.env
 if ENV_FILE.exists():
     for line in ENV_FILE.read_text().splitlines():
         line = line.strip()
@@ -65,9 +59,12 @@ if ENV_FILE.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-GOOGLE_CREDS = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-if GOOGLE_CREDS:
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDS
+
+# ── Project lib ──────────────────────────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.google_clients import drive
+from lib.drive_helpers import get_or_create_folder
+from lib import chat as chatmod
 
 REGISTRY_LOCK = asyncio.Lock()
 
