@@ -97,10 +97,12 @@ name), so a partial run can always be finished by running the same command again
   > `Khac-<Họ Tên>.ext` nếu không hợp `CV`) — giữ đúng quy tắc `<Loại>-<Họ Tên>.ext`, đừng đặt tên tự do
   > kiểu "Thông tin cá nhân KH gửi.jpg". (`scan_pipeline.py` đã được chỉnh để Gemini + `classify_doc_type`
   > tự nhận diện tờ tự khai → `CV` với cờ ⚠️ needs_review, nhưng vẫn nên rà lại.)
-  > Phân biệt ảnh: **ảnh chân dung CHÍNH THỨC kiểu ảnh dán hồ sơ/hộ chiếu** (1 người, đầu+vai, phông đơn sắc
-  > trắng/xanh, nhìn thẳng, không cảnh vật) → tag **`Anh the`** (mục 9 FARM "Ảnh thẻ 5x7"); **người đang làm việc /
-  > làm nông / ở vườn-ruộng-nhà kính** (dù thấy mặt) → `Anh-video lam nong` (mục 26); **ảnh nhiều người / gia đình /
-  > tiệc** → `Anh gia dinh` (mục 25). Gemini gắn cờ `extracted.la_anh_the` cho ảnh thẻ; `classify_doc_type` tin cờ đó.
+  > Phân biệt ảnh (chỉ khi **cả file LÀ một tấm ảnh** — ảnh chân dung in TRÊN CCCD/hộ chiếu/bằng cấp thì phân theo
+  > giấy tờ đó, KHÔNG phải `Anh the`): **ảnh chân dung CHÍNH THỨC kiểu ảnh dán hồ sơ** (1 người, đầu+vai, phông đơn
+  > sắc trắng/xanh, nhìn thẳng, không cảnh vật) → tag **`Anh the`** (mục 9 FARM "Ảnh thẻ 5x7"); **người đang làm
+  > việc / làm nông / ở vườn-ruộng-nhà kính** (dù thấy mặt) → `Anh-video lam nong` (mục 26); **ảnh nhiều người /
+  > gia đình / tiệc** → `Anh gia dinh` (mục 25). Gemini gắn cờ `extracted.la_anh_the` cho ảnh thẻ riêng lẻ;
+  > `classify_doc_type` chỉ tin cờ đó sau khi đã loại trừ doc_type / tên file đã chỉ rõ loại giấy tờ.
 - Other extensions (`.mov`, `.heic`, `.docx`, …) are still **uploaded**
   (classified from the filename, flagged `needs_review`) so nothing is lost.
 - Each file: up to `--retries` attempts with exponential backoff on any error.

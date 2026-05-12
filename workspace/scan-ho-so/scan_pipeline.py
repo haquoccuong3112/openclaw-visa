@@ -165,11 +165,13 @@ Các trường:
 - doc_type: loại giấy tờ tiếng Việt — PHÂN LOẠI THEO BẢN CHẤT GIẤY TỜ, KHÔNG theo các trường/thông tin mà nó nhắc tới.
   • "Căn cước công dân"/"Hộ chiếu"/"Sổ tiết kiệm"/"Lý lịch tư pháp"/"Sao kê ngân hàng"/… CHỈ khi file ĐÚNG LÀ giấy tờ đó
     (vd: CCCD = tấm thẻ in 2 mặt có ảnh chân dung + chip/QR; hộ chiếu = cuốn hộ chiếu; sổ tiết kiệm = cuốn sổ ngân hàng).
-  • PHÂN BIỆT ẢNH:
-    – ảnh chân dung CHÍNH THỨC kiểu ảnh dán hồ sơ / hộ chiếu: 1 người, chỉ đầu + vai, phông nền ĐƠN SẮC (trắng/xanh),
-      nhìn thẳng, KHÔNG có cảnh vật / hoạt động → doc_type = "Ảnh thẻ" VÀ "extracted.la_anh_the" = true;
+  • PHÂN BIỆT ẢNH (chỉ áp dụng khi CẢ FILE LÀ một tấm ảnh — không áp dụng cho ảnh chân dung in TRÊN giấy tờ khác):
+    – cả file LÀ một tấm ảnh chân dung CHÍNH THỨC kiểu ảnh dán hồ sơ / hộ chiếu: 1 người, chỉ đầu + vai, phông nền
+      ĐƠN SẮC (trắng/xanh), nhìn thẳng, KHÔNG có cảnh vật / hoạt động → doc_type = "Ảnh thẻ" VÀ "extracted.la_anh_the" = true;
     – 1 người đang LÀM VIỆC / làm nông / ở vườn-ruộng-nhà kính / chăm cây-trồng hoa (dù thấy rõ mặt) → doc_type = "Ảnh làm nông" (KHÔNG phải "Ảnh thẻ");
     – ảnh chụp NHIỀU người / gia đình / tiệc / sự kiện → doc_type = "Ảnh gia đình".
+    ⚠️ Một tấm ảnh chân dung in TRÊN một giấy tờ khác (thẻ CCCD, cuốn hộ chiếu, bằng cấp, sơ yếu lý lịch…) thì phân
+    loại theo giấy tờ đó ("Căn cước công dân" / "Hộ chiếu" / …) — KHÔNG phải "Ảnh thẻ", và la_anh_the = false.
   • Một tờ giấy / biểu mẫu do KHÁCH HÀNG TỰ KHAI / VIẾT TAY / TỰ ĐIỀN thông tin cá nhân (họ tên, ngày sinh, số CCCD,
     địa chỉ, người thân…) → doc_type = "Thông tin cá nhân (tự khai)" (≈ sơ yếu lý lịch), KHÔNG phải "Căn cước công dân"
     chỉ vì có ô "Số CCCD". Tương tự với các loại giấy khác — đừng vì file nhắc đến số/tên gì mà gán nhầm loại.
@@ -184,7 +186,7 @@ Các trường:
   chu_tai_khoan, so_tai_khoan_hoac_so, so_tien, ky_han, ngay_dao_han, ngay_xac_nhan_so_du, so_du,
   ky_sao_ke_tu, ky_sao_ke_den, ten_cong_ty, ma_so_bhxh, giai_doan_dong_bhxh, ma_the_bhyt, bhyt_gia_tri_tu, bhyt_gia_tri_den,
   tinh_trang_an_tich, la_to_khai (true nếu là tờ tự khai / biểu mẫu khách tự ghi; false nếu là giấy tờ chính thức do cơ quan cấp),
-  la_anh_the (true CHỈ với ảnh chân dung chính thức kiểu ảnh dán hồ sơ — KHÔNG phải ảnh sinh hoạt / làm việc / làm nông / chụp nhóm),
+  la_anh_the (true CHỈ khi cả file LÀ một tấm ảnh chân dung riêng lẻ kiểu ảnh dán hồ sơ — KHÔNG phải ảnh sinh hoạt / làm việc / làm nông / chụp nhóm, và KHÔNG phải ảnh chân dung in trên CCCD / hộ chiếu / bằng cấp),
   co_dau_moc (true/false), co_chu_ky (true/false), visual_flags (["ảnh mờ","nghi tẩy xóa ...","thiếu chữ ký","thiếu dấu mộc",...])
 
 Tên file: {filename}
@@ -436,6 +438,8 @@ def run_self_test() -> int:
     assert classify_doc_type("Ảnh chân dung", "", "ID photo-Mo.jpg").tag == "Anh the"
     assert classify_doc_type("Ảnh chân dung người làm nông trong nhà kính", "chăm cây", "x.jpg").tag == "Anh-video lam nong"
     assert classify_doc_type("Ảnh chụp gia đình", "tiệc sinh nhật", "x.jpg").tag == "Anh gia dinh"
+    # CCCD: ảnh chân dung in trên thẻ → vẫn CCCD, không bị cờ la_anh_the kéo thành "Anh the"
+    assert classify_doc_type("Căn cước công dân", "thẻ căn cước có ảnh chân dung", "CCCD.pdf", extracted={"la_anh_the": True}).tag == "CCCD"
     # OCR song song: prefetch bỏ qua file ext-lạ / dry-run / list rỗng (không chạm API), process_one nhận prefetched_gem
     import inspect as _inspect
     assert callable(ocr_prefetch) and "prefetched_gem" in _inspect.signature(process_one).parameters

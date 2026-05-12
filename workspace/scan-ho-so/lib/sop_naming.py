@@ -180,6 +180,9 @@ def classify_doc_type(
       1. doc_type alone (high confidence) when Gemini gave a clear answer.
       2. STRONG filename hint (medium confidence) — always tried before falling
          to summary, so noisy summaries can't override an obvious filename.
+      2b. `extracted.la_anh_the` (Gemini saw a standalone portrait/ID photo file) → `Anh the`. Checked AFTER
+          doc_type + filename so a CCCD/passport/diploma (whose face-photo is just printed on it) isn't mistaken
+          for an `Anh the`.
       3. doc_type + filename loose match (medium).
       4. Summary as last resort (low, needs_review).
     """
@@ -192,11 +195,6 @@ def classify_doc_type(
         and re.search(r"\bcccd\b|can\s*cuoc|chung\s*minh|\bcmnd\b|thong\s*tin\s*ca\s*nhan", _g_hay)
     ):
         return Classification(tag="CV", folder="Personal Docs", confidence="medium", needs_review=True)
-    # Pass 0b: Gemini cờ đây là ảnh chân dung CHÍNH THỨC (ảnh thẻ / ảnh dán hồ sơ) → Anh the (mục 9 FARM) —
-    # do Gemini nhìn ảnh quyết định nên thắng cả pattern doc_type lẫn tên file. (Ảnh người làm việc/làm nông hay
-    # ảnh nhóm/gia đình thì la_anh_the=false → đi tiếp các pass dưới → "Anh-video lam nong" / "Anh gia dinh".)
-    if isinstance(extracted, dict) and extracted.get("la_anh_the"):
-        return Classification(tag="Anh the", folder="Personal Docs", confidence="medium", needs_review=False)
 
     is_unclear = (not raw_doc_type) or any(
         bad in (raw_doc_type or "").lower()
@@ -216,6 +214,12 @@ def classify_doc_type(
         for pattern, tag, folder in FILENAME_HINTS:
             if re.search(pattern, fn_hay):
                 return Classification(tag=tag, folder=folder, confidence="medium", needs_review=False)
+
+    # Pass 2b: Gemini cờ "cả file LÀ một tấm ảnh chân dung riêng lẻ kiểu ảnh dán hồ sơ" → Anh the (mục 9 FARM).
+    # Đặt SAU doc_type + tên file: nếu là CCCD / hộ chiếu / bằng cấp… (ảnh chân dung chỉ in trên giấy đó) thì đã
+    # được nhận đúng ở trên; cờ này chỉ cứu trường hợp file đúng là ảnh thẻ mà doc_type/tên file mù mờ.
+    if isinstance(extracted, dict) and extracted.get("la_anh_the"):
+        return Classification(tag="Anh the", folder="Personal Docs", confidence="medium", needs_review=False)
 
     # Pass 3: filename + doc_type loose (medium)
     fn_hay_parts = [strip_diacritics(str(s)).lower() for s in (raw_doc_type, original_filename) if s]
@@ -316,9 +320,12 @@ if __name__ == "__main__":
     assert classify_doc_type("Thông tin gia đình", "khách tự ghi tay họ tên các thành viên", "CCCD-Hoang Thi Mo.jpg").tag == "CV"
     # ảnh thẻ 5x7 (ảnh dán hồ sơ, 1 người) → "Anh the" (mục 9 FARM); ảnh người làm nông → "Anh-video lam nong"; nhóm/tiệc → "Anh gia dinh"
     assert classify_doc_type("Ảnh thẻ 5x7", "ảnh chân dung phông trắng", "Khac-Hoang Thi Mo.jpg").tag == "Anh the"
-    assert classify_doc_type("Ảnh", "", "x.jpg", extracted={"la_anh_the": True}).tag == "Anh the"   # cờ Gemini
+    assert classify_doc_type("Ảnh", "", "x.jpg", extracted={"la_anh_the": True}).tag == "Anh the"   # cờ Gemini (không có dấu hiệu khác)
     assert classify_doc_type("Ảnh chân dung", "", "ID photo-Hoang Thi Mo.jpg").tag == "Anh the"      # round-trip qua tên file
     assert classify_doc_type("Hình ảnh", "", "Anh the-Hoang Thi Mo.jpg").tag == "Anh the"            # round-trip qua tên file
     assert classify_doc_type("Ảnh chân dung người làm nông trong nhà kính", "đang chăm cây", "x.jpg").tag == "Anh-video lam nong"  # KHÔNG nuốt ảnh làm nông
     assert classify_doc_type("Ảnh chụp gia đình", "tiệc sinh nhật", "x.jpg").tag == "Anh gia dinh"    # KHÔNG nuốt ảnh gia đình
+    # CCCD (ảnh chân dung chỉ in TRÊN thẻ) → vẫn CCCD, KHÔNG bị cờ la_anh_the kéo thành "Anh the"
+    assert classify_doc_type("Căn cước công dân", "thẻ căn cước có ảnh chân dung và chip", "CCCD.pdf", extracted={"la_anh_the": True}).tag == "CCCD"
+    assert classify_doc_type("", "", "CCCD.pdf", extracted={"la_anh_the": True}).tag == "CCCD"        # tên file CCCD thắng cờ la_anh_the
     print("classify guards OK")
