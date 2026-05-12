@@ -1,14 +1,12 @@
 # ~/.openclaw/ is mostly OpenClaw STATE + CREDENTIALS. Default: ignore EVERYTHING;
-# un-ignore only the things that are safe to publish (the agent workspace + a couple
-# harmless static dirs). NEVER add credentials/, identity/, telegram/, openclaw.json,
-# exec-approvals.json, agents/, logs/, tasks/, flows/, memory/, plugins/, devices/, ...
+# un-ignore ONLY the agent workspace. NEVER add credentials/, identity/, telegram/,
+# openclaw.json, exec-approvals.json, agents/, logs/, tasks/, flows/, memory/, plugins/,
+# devices/, completions/, canvas/, tui/, tools/, ... — they're machine-local state.
 /*
 !/.gitignore
 !/workspace/
-!/completions/
-!/canvas/
 
-# belt-and-suspenders: even if workspace/.gitignore is lost, never commit these
+# belt-and-suspenders for things under workspace/ (workspace/.gitignore also covers these):
 workspace/scan-ocr.env
 workspace/google-service-account.json
 workspace/**/*.pem
@@ -21,3 +19,6 @@ workspace/**/__pycache__/
 workspace/**/*.pyc
 workspace/**/*.bak
 workspace/**/*.bak-*
+# keep only our custom skill in git; the stock ClawHub skills are re-installable
+workspace/skills/*
+!workspace/skills/scan-ho-so-pipeline/

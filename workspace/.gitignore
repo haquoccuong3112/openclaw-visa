@@ -24,6 +24,10 @@ scan-ho-so/group_registry.json.bak
 # one-time bootstrap ritual (deleted after first run anyway)
 BOOTSTRAP.md
 
+# skills/ — keep ONLY our custom skill in git; stock ClawHub skills are re-installable
+skills/*
+!skills/scan-ho-so-pipeline/
+
 # OS / node junk
 .DS_Store
 *.swp
