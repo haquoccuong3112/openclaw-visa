@@ -32,3 +32,6 @@ skills/*
 .DS_Store
 *.swp
 node_modules/
+
+# per-workspace OpenClaw state dir (created by the gateway) — runtime state, never commit
+.openclaw/

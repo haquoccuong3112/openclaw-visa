@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-scan_zip.py — robust, idempotent batch processor for Đồng Hành visa documents.
+scan_pipeline.py — robust, idempotent batch processor for Đồng Hành visa documents.
+
+Part of the scan-ho-so app. Run it directly, or via the bot (`telegram_listener.py`
+spawns it as a subprocess), or via the OpenClaw `scan-ho-so-pipeline` skill
+(`../skills/scan-ho-so-pipeline/SKILL.md` — that file is just the procedure docs;
+the code is here).
 
 Pipeline (the SOP "unzip → OCR/summarize → rename → upload to Drive" task):
   1. Enumerate EVERY real file in the input .zip / directory (recursive),
@@ -19,10 +24,10 @@ Pipeline (the SOP "unzip → OCR/summarize → rename → upload to Drive" task)
      knows to re-run (which will pick up only the unfinished files).
 
 Usage:
-  scan_zip.py INPUT --case-folder-id ID --applicant "Hoang Thi Mo" \
+  scan_pipeline.py INPUT --case-folder-id ID --applicant "Hoang Thi Mo" \
       [--case-id MoTest91-WP10m] [--manifest PATH] [--retries 3] [--dry-run]
-  scan_zip.py INPUT --from-registry <telegram_chat_id>   # resolve case from group_registry.json
-  scan_zip.py --self-test
+  scan_pipeline.py INPUT --from-registry <telegram_chat_id>   # resolve case from group_registry.json
+  scan_pipeline.py --self-test
 
 The Drive whitelist still applies: this only ever creates folders/files *under*
 the case folder you pass (which itself lives under the bot's OpenClaw/Bot-folder
@@ -43,11 +48,9 @@ import traceback
 import zipfile
 from pathlib import Path
 
-# --- locate the maintained SOP library (single source of truth for naming) ---
-# this script lives at <workspace>/skills/scan-ho-so-pipeline/scripts/scan_zip.py;
-# the SOP library is at <workspace>/scan-ho-so. SCAN_HO_SO_DIR env var overrides.
-_DEFAULT_SCAN_HO_SO_DIR = Path(__file__).resolve().parents[3] / "scan-ho-so"
-SCAN_HO_SO_DIR = Path(os.environ.get("SCAN_HO_SO_DIR", str(_DEFAULT_SCAN_HO_SO_DIR)))
+# --- this file lives in the scan-ho-so app dir; lib/ and data/ are right here ---
+# (SCAN_HO_SO_DIR env var can override, e.g. if you run a copy from elsewhere).
+SCAN_HO_SO_DIR = Path(os.environ.get("SCAN_HO_SO_DIR", str(Path(__file__).resolve().parent)))
 if str(SCAN_HO_SO_DIR) not in sys.path:
     sys.path.insert(0, str(SCAN_HO_SO_DIR))
 
@@ -433,7 +436,7 @@ def main(argv=None) -> int:
         elif in_path.is_dir():
             files = collect_from_dir(in_path)
         elif in_path.suffix.lower() == ".zip":
-            tmpdir = Path(tempfile.mkdtemp(prefix="scan_zip_"))
+            tmpdir = Path(tempfile.mkdtemp(prefix="scan_pipeline_"))
             files = collect_from_zip(in_path, tmpdir)
         else:
             # a single loose file

@@ -10,6 +10,7 @@
 # belt-and-suspenders for things under workspace/ (workspace/.gitignore also covers these):
 workspace/scan-ocr.env
 workspace/google-service-account.json
+workspace/.openclaw/
 workspace/**/*.pem
 workspace/**/*.key
 workspace/scan-ho-so/runs/

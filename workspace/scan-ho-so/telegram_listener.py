@@ -51,9 +51,8 @@ from telegram.ext import (
 
 # ── Project lib ──────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
-from lib.sop_naming import classify_doc_type, build_filename, detect_english, title_case_ascii
 from lib.google_clients import drive
-from lib.drive_helpers import get_or_create_folder, upload_file
+from lib.drive_helpers import get_or_create_folder
 from lib import chat as chatmod
 
 # ── Env ──────────────────────────────────────────────────────────────────────
@@ -70,18 +69,12 @@ GOOGLE_CREDS = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 if GOOGLE_CREDS:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDS
 
-# Concurrency controls:
-# - Telegram can process updates from multiple groups in parallel.
-# - Gemini calls are capped so many groups/files don't overload OpenRouter/Gemini.
-GEMINI_CONCURRENCY = int(os.environ.get("GEMINI_CONCURRENCY", "6"))
-GEMINI_SEMAPHORE = asyncio.Semaphore(GEMINI_CONCURRENCY)
-BATCH_FILE_CONCURRENCY = int(os.environ.get("BATCH_FILE_CONCURRENCY", "8"))
 REGISTRY_LOCK = asyncio.Lock()
 
 # ── Debounce / batching cho file upload từ nhóm KH ───────────────────────────
 # Telegram giao mỗi file của một lần "gửi nhiều file" thành 1 update; concurrent_updates(16)
 # còn cho nhiều handle_file của cùng chat chạy đan xen. Gom các file đến gần nhau thành
-# MỘT lần scan_zip.py → MỘT manifest → MỘT tin tóm tắt (+≤1 tin checklist).
+# MỘT lần chạy scan_pipeline.py → MỘT manifest → MỘT tin tóm tắt (+≤1 tin checklist).
 SCAN_DEBOUNCE_SECONDS  = float(os.environ.get("SCAN_DEBOUNCE_SECONDS", "8"))    # chờ "im lặng" sau file cuối
 SCAN_DEBOUNCE_MAX_WAIT = float(os.environ.get("SCAN_DEBOUNCE_MAX_WAIT", "90"))  # trần tổng chờ kể từ file đầu
 SCAN_DEBOUNCE_ACK = os.environ.get("SCAN_DEBOUNCE_ACK", "1") not in ("0", "", "false", "False")
@@ -531,106 +524,6 @@ def get_or_create_staff_sheet(staff: dict, case_id: str, applicant: str,
 
     return sheet_id
 
-# ── Gemini direct document understanding ─────────────────────────────────────
-async def gemini_classify_file(file_path: Path, filename: str) -> dict:
-    import base64, httpx
-    api_key = os.environ.get("OPENROUTER_API_KEY","")
-    if not api_key:
-        return {"doc_type":"","person":[],"summary_vi":"","key_fields":{}}
-    mime = EXT_MIME.get(file_path.suffix.lower(), "application/pdf")
-    content_b64 = base64.b64encode(file_path.read_bytes()).decode()
-    prompt = f"""Đọc trực tiếp file hồ sơ visa Canada đính kèm và trả về JSON.
-
-Yêu cầu:
-- doc_type: loại giấy tờ tiếng Việt
-- person: [{{"full_name":"...","date_of_birth":"..."}}]
-- summary_vi: tóm tắt 1-2 câu
-- key_fields: {{"số giấy tờ":"...","ngày cấp":"...","nơi cấp":"..."}}
-
-Tên file: {filename}
-
-Chỉ trả JSON thuần. Nếu không đọc được, vẫn trả JSON với summary_vi mô tả lý do."""
-    content = [
-        {"type":"text", "text": prompt},
-        {"type":"file", "file": {"filename": filename, "file_data": f"data:{mime};base64,{content_b64}"}},
-    ]
-    async with GEMINI_SEMAPHORE:
-        async with httpx.AsyncClient(timeout=90) as client:
-            resp = await client.post("https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model":"google/gemini-2.5-flash-lite",
-                      "messages":[{"role":"user","content":content}],
-                      "temperature":0.1})
-        resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"].strip()
-    content = re.sub(r'^```[a-z]*\n?','',content); content = re.sub(r'\n?```$','',content)
-    try: return json.loads(content)
-    except: return {"doc_type":"","person":[],"summary_vi":content[:300],"key_fields":{}}
-
-# ── Process one file ──────────────────────────────────────────────────────────
-async def process_one_file(file_path: Path, src_name: str,
-                            case_folder_id: str, applicant_name: str,
-                            case_id: str) -> dict:
-    gem = await gemini_classify_file(file_path, src_name)
-    if not isinstance(gem, dict):
-        gem = {"doc_type":"", "person":[], "summary_vi":str(gem)[:300], "key_fields":{}}
-    if not isinstance(gem.get("key_fields"), dict):
-        gem["key_fields"] = {}
-
-    raw_dt  = gem.get("doc_type","")
-    summary = str(gem.get("summary_vi",""))[:400]
-    cls     = classify_doc_type(raw_dt, summary, src_name)
-
-    person = gem.get("person")
-    subject_raw = ""
-    if isinstance(person, list) and person:
-        p0 = person[0]
-        subject_raw = p0.get("full_name","") if isinstance(p0, dict) else str(p0)
-    elif isinstance(person, dict): subject_raw = person.get("full_name","")
-    elif isinstance(person, str):  subject_raw = person
-    if not subject_raw: subject_raw = applicant_name
-
-    is_eng   = detect_english(summary,"")
-    new_name = build_filename(cls.tag, subject_raw, file_path.suffix, is_english=is_eng)
-
-    top_id  = get_or_create_folder(cls.folder,    case_folder_id, drive_id=SHARED_DRIVE_ID)
-    meta_id = get_or_create_folder(OCR_META_FOLDER, case_folder_id, drive_id=SHARED_DRIVE_ID)
-
-    mime = EXT_MIME.get(file_path.suffix.lower(), "application/pdf")
-    up   = upload_file(str(file_path), new_name, top_id, drive_id=SHARED_DRIVE_ID, mime=mime)
-
-    it = {
-        "case_id": case_id, "src_name": src_name, "new_name": new_name,
-        "tag": cls.tag, "folder": cls.folder,
-        "subject": title_case_ascii(subject_raw),
-        "confidence": cls.confidence, "needs_review": cls.needs_review,
-        "is_english": is_eng, "summary": summary,
-        "drive_link": up["link"], "gemini": gem,
-    }
-
-    base = Path(new_name).stem
-    # .md
-    review = " ⚠️ Cần kiểm tra" if cls.needs_review else ""
-    eng    = " 🌐 ENG" if is_eng else ""
-    md = (f"# {new_name}\n\n"
-          f"**Loại:** {cls.tag} | **Folder:** {cls.folder}\n"
-          f"**Người:** {it['subject']} | **Confidence:** {cls.confidence}{review}{eng}\n"
-          f"**File gốc:** {src_name}\n\n"
-          f"## Tóm tắt\n{summary}\n\n")
-    if gem.get("key_fields"):
-        md += "## Thông tin chính\n" + "\n".join(f"- **{k}:** {v}" for k,v in gem["key_fields"].items()) + "\n"
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
-        f.write(md); md_path = f.name
-    upload_file(md_path, f"{base}.md", meta_id, drive_id=SHARED_DRIVE_ID, mime="text/markdown")
-    os.unlink(md_path)
-    # .json
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-        json.dump(it, f, ensure_ascii=False, indent=2); json_path = f.name
-    upload_file(json_path, f"{base}.json", meta_id, drive_id=SHARED_DRIVE_ID, mime="application/json")
-    os.unlink(json_path)
-
-    return it
-
 # ── On bot joins a group ──────────────────────────────────────────────────────
 async def on_bot_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fired when bot is added to a group."""
@@ -758,22 +651,23 @@ async def _setup_case(bot: Bot, reg: dict, pair_key: str,
     await send_message_handle_migration(bot, kh_chat_id, "✅")
     logger.info(f"Case setup done: {case_name} | staff: {staff_names}")
 
-# ── Skill-backed pipeline (scan-ho-so-pipeline) ──────────────────────────────
-# The actual unzip → OCR → rename → upload work is delegated to the OpenClaw
-# skill script so behaviour stays consistent with the agent. The script:
+# ── Document pipeline (scan_pipeline.py) ─────────────────────────────────────
+# The actual unzip → OCR → rename → upload work is delegated to scan_pipeline.py
+# (a sibling file; also exposed to the OpenClaw agent via the scan-ho-so-pipeline
+# skill, which is just docs). Run as a subprocess so behaviour stays consistent.
+# The pipeline:
 #   * processes EVERY file in a zip/dir (keeps non pdf/jpg/png too, no OCR)
 #   * retries each file, is idempotent, writes a manifest covering all inputs
 #   * exits non-zero if anything still failed → we re-run (safe; uploads skip dups)
-SCAN_SKILL_SCRIPT = os.environ.get(
-    "SCAN_SKILL_SCRIPT",
-    # workspace layout: <workspace>/scan-ho-so/telegram_listener.py + <workspace>/skills/scan-ho-so-pipeline/
-    str(Path(__file__).resolve().parent.parent / "skills" / "scan-ho-so-pipeline" / "scripts" / "scan_zip.py"),
+SCAN_PIPELINE_SCRIPT = os.environ.get(
+    "SCAN_PIPELINE_SCRIPT",
+    str(Path(__file__).resolve().parent / "scan_pipeline.py"),
 )
 SCAN_RUN_CONCURRENCY = int(os.environ.get("SCAN_RUN_CONCURRENCY", "2"))
 SCAN_RUN_SEMAPHORE = asyncio.Semaphore(SCAN_RUN_CONCURRENCY)
 SCAN_MAX_ATTEMPTS = int(os.environ.get("SCAN_MAX_ATTEMPTS", "3"))
 # One scan at a time *per case folder* — different cases run in parallel (up to
-# SCAN_RUN_CONCURRENCY) but a given case is never processed by two scan_zip.py
+# SCAN_RUN_CONCURRENCY) but a given case is never processed by two scan_pipeline.py
 # runs at once (avoids racing on the same Drive folder / duplicate-named files).
 _CASE_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -782,8 +676,8 @@ def _case_lock(case_key: str) -> asyncio.Lock:
     if lk is None:
         lk = _CASE_LOCKS[case_key] = asyncio.Lock()
     return lk
-# Extensions we accept from a KH group (the skill can upload anything; this just
-# stops random junk). Mirrors the skill's OCR + "other" extension sets.
+# Extensions we accept from a KH group (the pipeline can upload anything; this just
+# stops random junk). Mirrors scan_pipeline.py's OCR + "other" extension sets.
 ACCEPTED_EXTS = (
     set(EXT_MIME) | ZIP_EXTS
     | {".mov", ".mp4", ".m4v", ".avi", ".heic", ".heif", ".tif", ".tiff",
@@ -792,7 +686,7 @@ ACCEPTED_EXTS = (
 
 
 async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checklist_only: bool = False):
-    """Run the scan-ho-so-pipeline skill; return the manifest dict.
+    """Run scan_pipeline.py; return the manifest dict.
 
     Normal mode: process input_path (.zip / dir / file) then run the AI checklist.
     checklist_only=True: skip OCR/upload, only (re)run the checklist for the case
@@ -803,8 +697,8 @@ async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checkl
     re-runs idempotently up to SCAN_MAX_ATTEMPTS while files are still failed.
     Returns the last manifest, or None if the script couldn't run.
     """
-    if not Path(SCAN_SKILL_SCRIPT).exists():
-        logger.error(f"scan skill script not found: {SCAN_SKILL_SCRIPT}")
+    if not Path(SCAN_PIPELINE_SCRIPT).exists():
+        logger.error(f"scan_pipeline.py not found: {SCAN_PIPELINE_SCRIPT}")
         return None
     man_dir = Path(tempfile.mkdtemp(prefix="scan_manifest_"))
     man_path = man_dir / "manifest.json"
@@ -813,7 +707,7 @@ async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checkl
     label = "checklist-only" if checklist_only else (Path(input_path).name if input_path else "?")
     async with _case_lock(case_key or str(chat_id)), SCAN_RUN_SEMAPHORE:
         for attempt in range(1, max_attempts + 1):
-            cmd = [sys.executable, SCAN_SKILL_SCRIPT]
+            cmd = [sys.executable, SCAN_PIPELINE_SCRIPT]
             if checklist_only:
                 cmd.append("--checklist-only")
             else:
@@ -825,7 +719,7 @@ async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checkl
             )
             out, _ = await proc.communicate()
             tail = out.decode(errors="replace")[-4000:] if out else ""
-            logger.info(f"scan_zip.py attempt {attempt}/{max_attempts} rc={proc.returncode} "
+            logger.info(f"scan_pipeline.py attempt {attempt}/{max_attempts} rc={proc.returncode} "
                         f"({label})\n{tail}")
             if man_path.exists():
                 try:
@@ -935,7 +829,7 @@ class _PendingBatch:
 
 def _unique_in_dir(workdir: Path, taken: list, src_name: str) -> str:
     """Tên file không trùng trong workdir VÀ không trùng `taken` (2 handle_file đan xen
-    reserve tên trước khi tải xong). Giữ basename gốc (skill còn dùng làm gợi ý phân loại);
+    reserve tên trước khi tải xong). Giữ basename gốc (scan_pipeline.py còn dùng làm gợi ý phân loại);
     nếu trùng thì chèn ' (2)', ' (3)' … trước phần mở rộng."""
     base = Path(src_name).name or "file.bin"
     suf  = Path(base).suffix
@@ -978,7 +872,7 @@ def _extract_zip_flat(zip_path: Path, dest_dir: Path) -> int:
 
 
 def _expand_zips_in_dir(workdir: Path) -> None:
-    """Giải nén tại chỗ mọi .zip trong workdir (1 cấp) rồi xoá file zip — để scan_zip.py
+    """Giải nén tại chỗ mọi .zip trong workdir (1 cấp) rồi xoá file zip — để scan_pipeline.py
     xử lý từng file bên trong (collect_from_dir chỉ glob file, không tự mở zip)."""
     for zp in [p for p in sorted(workdir.iterdir()) if p.is_file() and p.suffix.lower() == ".zip"]:
         try:

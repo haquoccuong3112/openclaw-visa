@@ -100,10 +100,10 @@ _REQUIRED_TOTAL = sum(1 for _, _, nhom in REQUIRED_DOCS if nhom == "bat_buoc")  
 
 
 # ---------------------------------------------------------------------------
-# danh sách 34 đơn vị hành chính cấp tỉnh (đọc từ provinces_34.json)
+# danh sách 34 đơn vị hành chính cấp tỉnh (đọc từ data/provinces_34.json)
 # ---------------------------------------------------------------------------
 def _load_provinces() -> dict:
-    p = SCAN_HO_SO_DIR / "provinces_34.json"
+    p = SCAN_HO_SO_DIR / "data" / "provinces_34.json"
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
