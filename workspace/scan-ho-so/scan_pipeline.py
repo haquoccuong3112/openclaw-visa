@@ -259,7 +259,7 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
 
             raw_dt = gem.get("doc_type", "")
             summary = str(gem.get("summary_vi", ""))[:400]
-            cls = classify_doc_type(raw_dt, summary, src_name)
+            cls = classify_doc_type(raw_dt, summary, src_name, extracted=gem.get("extracted"))
             needs_review = cls.needs_review or (not can_ocr)
             subject_raw = subject_from_gemini(gem, applicant) or applicant
             subject_title = title_case_ascii(subject_raw) or "Unknown"
@@ -372,6 +372,9 @@ def run_self_test() -> int:
     # regression: a self-filled / hand-written personal-info form must be CV, not CCCD
     assert classify_doc_type("Thông tin cá nhân (tự khai)", "khách tự ghi số CCCD và địa chỉ", "info.jpg").tag == "CV"
     assert classify_doc_type("Căn cước công dân tự khai viết tay", "khách hàng tự điền", "x.jpg").tag == "CV"
+    # ...kể cả khi tên file là "CCCD-…" hoặc doc_type là "Căn cước" mà Gemini cờ extracted.la_to_khai=true
+    assert classify_doc_type("Căn cước công dân", "tờ có ô số CCCD", "CCCD-Mo.jpg", extracted={"la_to_khai": True}).tag == "CV"
+    assert classify_doc_type("Thông tin gia đình", "danh sách thành viên trong nhà, viết tay", "CCCD-Mo.jpg").tag == "CV"
     # ...but the real printed CCCD card must still be CCCD
     assert classify_doc_type("Căn cước công dân", "thẻ căn cước 2 mặt có ảnh chân dung và chip", "cccd.jpg").tag == "CCCD"
     # checklist module sanity

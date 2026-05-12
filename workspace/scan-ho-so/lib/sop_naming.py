@@ -37,7 +37,7 @@ DOC_TYPE_PATTERNS: list[tuple[str, str, str]] = [
     (r"\bbhxh\b|bao hiem xa hoi", "BHXH", "Personal Docs"),
     (r"\bbhyt\b|bao hiem y te|the bao hiem y te", "BHYT", "Personal Docs"),
     (r"\biom\b", "IOM", "Personal Docs"),
-    (r"\bcv\b|curriculum vitae|so yeu ly lich|syll|thong tin ca nhan|tu khai|phieu thong tin|bieu mau", "CV", "Personal Docs"),
+    (r"\bcv\b|curriculum vitae|so yeu ly lich|so yeu|syll|thong tin ca nhan|thong tin gia dinh|tu khai|to khai|phieu thong tin|phieu khai|bieu mau", "CV", "Personal Docs"),
     (r"the tin dung|credit card|the visa|the mc|mastercard|visa card|the ngan hang", "The Visa-MC", "Personal Docs"),
     (r"bang khen|giay khen|huy chuong", "Bang khen", "Personal Docs"),
     (r"anh gia dinh|anh chup gia dinh|family photo|tiec sinh nhat|tiec day thang|happy full moon|happy 1 month|day thang", "Anh gia dinh", "Personal Docs"),
@@ -168,22 +168,28 @@ def classify_doc_type(
     raw_doc_type: str,
     summary: str = "",
     original_filename: str = "",
+    extracted: Optional[dict] = None,
 ) -> Classification:
     """Map Gemini's free-text doc_type → SOP tag + 1 of 4 top folders.
 
     Strategy:
-      0. Guard: a self-filled / hand-written form that only *mentions* CCCD info
-         (số CCCD, họ tên, địa chỉ…) is NOT a CCCD card → tag CV, needs_review.
+      0. Guard: a self-filled / hand-written form (Gemini's `extracted.la_to_khai`, or a "tự khai / viết tay /
+         thông tin gia đình …" wording that also mentions CCCD/personal info) is NOT a CCCD card / official doc
+         → tag CV, needs_review. This beats the filename hint (a file *named* "CCCD-…" can still be a tự-khai form).
       1. doc_type alone (high confidence) when Gemini gave a clear answer.
       2. STRONG filename hint (medium confidence) — always tried before falling
          to summary, so noisy summaries can't override an obvious filename.
       3. doc_type + filename loose match (medium).
       4. Summary as last resort (low, needs_review).
     """
-    # Pass 0: "tự khai/viết tay" + CCCD-ish wording → it's a personal-info form (CV), not the CCCD card.
+    # Pass 0: tờ tự khai / viết tay → CV, KHÔNG phải CCCD/giấy chính thức (kể cả khi tên file/doc_type nói "CCCD").
+    _la_to_khai = bool(isinstance(extracted, dict) and extracted.get("la_to_khai"))
     _g_hay = strip_diacritics(f"{raw_doc_type or ''} {summary or ''}").lower()
-    if re.search(r"tu\s*khai|to\s*khai|viet\s*tay|bieu\s*mau|tu\s*dien|tu\s*ghi|tu\s*viet", _g_hay) and \
-       re.search(r"\bcccd\b|can\s*cuoc|chung\s*minh|\bcmnd\b|thong\s*tin\s*ca\s*nhan", _g_hay):
+    if _la_to_khai or (
+        re.search(r"tu\s*khai|to\s*khai|viet\s*tay|bieu\s*mau|tu\s*dien|tu\s*ghi|tu\s*viet|"
+                  r"thong\s*tin\s*gia\s*dinh|so\s*yeu|phieu\s*khai|khai\s*bao\s*thong\s*tin", _g_hay)
+        and re.search(r"\bcccd\b|can\s*cuoc|chung\s*minh|\bcmnd\b|thong\s*tin\s*ca\s*nhan", _g_hay)
+    ):
         return Classification(tag="CV", folder="Personal Docs", confidence="medium", needs_review=True)
 
     is_unclear = (not raw_doc_type) or any(
@@ -297,3 +303,9 @@ if __name__ == "__main__":
         c = classify_doc_type(raw_dt, summ, fn)
         name = build_filename(c.tag, subj, ext)
         print(f"{c.confidence:6}  {c.folder:14}  {name:50}  ← {raw_dt!r}")
+    # tờ tự khai / "thông tin gia đình" viết tay → CV, KHÔNG phải CCCD — kể cả khi tên file là "CCCD-…"
+    assert classify_doc_type("Căn cước công dân", "thẻ căn cước 2 mặt có chip", "CCCD-Hoang Thi Mo.jpg").tag == "CCCD"
+    assert classify_doc_type("Căn cước công dân", "tờ giấy có ô số CCCD", "CCCD-Hoang Thi Mo.jpg",
+                             extracted={"la_to_khai": True}).tag == "CV"
+    assert classify_doc_type("Thông tin gia đình", "khách tự ghi tay họ tên các thành viên", "CCCD-Hoang Thi Mo.jpg").tag == "CV"
+    print("classify guards OK")

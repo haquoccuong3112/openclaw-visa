@@ -80,6 +80,22 @@ def _norm(s: str) -> str:
     return s.lower().strip()
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Từ chức năng / xưng hô tiếng Việt — bỏ khi so token tên KH (đứng một mình thì vô nghĩa để phân biệt case).
+_STOPWORDS = {
+    "la", "va", "thi", "cua", "cho", "voi", "ve", "nay", "do", "day", "kia", "sao", "roi", "con", "chua", "da",
+    "duoc", "dang", "se", "khong", "ko", "kiem", "tra", "xem", "check", "hoi", "can", "muon", "biet", "gi", "nao",
+    "giup", "dum", "oi", "the", "hay", "hoac", "lai", "nhe", "nha", "di", "de", "ban", "minh", "toi", "ad", "bot",
+    "ai", "ne", "luon", "mot", "cai", "co", "khi", "trong", "truoc", "sau", "moi", "nguoi", "ho", "so", "hoso",
+    "anh", "chi", "em", "a", "o", "ma",
+}
+
+
+def _toks(s: str) -> set:
+    """Tập token tên (không dấu, lowercase, đã bỏ stopword)."""
+    return set(_TOKEN_RE.findall(_norm(s))) - _STOPWORDS
+
+
 # ===========================================================================
 # Cooldown chống spam
 # ===========================================================================
@@ -110,30 +126,41 @@ def cases_for_staff(reg: dict, user_id) -> list:
     return out
 
 
+def _match_case(user_message: str, my_cases: list):
+    """Khớp `user_message` với danh sách case theo token tên KH (đã bỏ stopword tiếng Việt).
+    Trả (info|None, conflicting:list). info != None ⇔ DUY NHẤT 1 case có độ trùng token cao nhất.
+    conflicting = các case cùng đỉnh khi >1 (để bot hỏi lại, có liệt kê); [] nếu không case nào trùng token nào."""
+    msg = _toks(user_message)
+    if not msg:
+        return None, []
+    scored = [(len(msg & _toks(info.get("applicant", ""))), info) for _, info in my_cases]
+    scored = [(n, info) for n, info in scored if n > 0]
+    if not scored:
+        return None, []
+    top = max(n for n, _ in scored)
+    best = [info for n, info in scored if n == top]
+    return (best[0], []) if len(best) == 1 else (None, best)
+
+
 def pick_case_for_dm(user_message: str, my_cases: list, active_folder):
-    """Trả (info|None, ask_text|None). info = entry registry của case được chọn cho phiên DM này."""
+    """Trả (info|None, ask_text|None). info = entry registry của case cho phiên DM này.
+    Khi phải hỏi lại: KHÔNG liệt kê toàn bộ KH — chỉ hỏi tên; chỉ liệt kê khi staff gõ thứ trùng nhiều case."""
     if not my_cases:
         return None, ("Bạn chưa được giao hồ sơ nào trong hệ thống (hoặc bot chưa ghi nhận hoạt động của bạn "
                       "trong nhóm Pro). Hãy hỏi trực tiếp trong nhóm Pro của khách hàng.")
     if len(my_cases) == 1:
         return my_cases[0][1], None
-    msg_norm = _norm(user_message)
-    matched = []
-    for _, info in my_cases:
-        nn = _norm(info.get("applicant", ""))
-        if len(nn) >= 6 and nn in msg_norm:
-            matched.append(info)
-    if len(matched) == 1:
-        return matched[0], None
-    if len(matched) > 1:
-        return None, "Khớp với nhiều hồ sơ: " + " · ".join(i.get("applicant", "?") for i in matched) + \
-                     ". Bạn muốn hỏi về hồ sơ nào? (ghi rõ tên KH)"
-    if active_folder:
-        for _, info in my_cases:
-            if info.get("folder_id") == active_folder:
-                return info, None
-    names = " · ".join(info.get("applicant", "?") for _, info in my_cases)
-    return None, f"Bạn đang phụ trách {len(my_cases)} hồ sơ: {names}. Bạn muốn hỏi về hồ sơ nào? (ghi rõ tên KH)"
+    info, conflicts = _match_case(user_message, my_cases)
+    if info is not None:                       # gõ đủ phân biệt → chốt luôn (kể cả khác case đang active)
+        return info, None
+    if active_folder:                          # đang hỏi tiếp về case đã chọn trong phiên DM này → giữ nguyên
+        for _, c in my_cases:
+            if c.get("folder_id") == active_folder:
+                return c, None
+    if conflicts:                              # gõ thứ trùng nhiều case → liệt kê đúng mấy case đó
+        names = " · ".join(c.get("applicant", "?") for c in conflicts)
+        return None, f"Khớp nhiều hồ sơ: {names}. Bạn hỏi hồ sơ nào? (gõ phần phân biệt, vd 'test8')"
+    return None, "Bạn muốn hỏi về hồ sơ KH nào? (gõ tên KH hoặc phần phân biệt, vd 'test8')"
 
 
 # ===========================================================================
@@ -854,7 +881,7 @@ if __name__ == "__main__":
     print("history_turns:", CHAT_HISTORY_TURNS, "| ctx_ttl:", CHAT_CTX_TTL, "| fulltext_ttl:", CHAT_FULLTEXT_TTL,
           "| web_ttl:", CHAT_WEB_TTL, "| cooldown:", CHAT_USER_COOLDOWN, "| concurrency:", CHAT_CONCURRENCY)
     for fn in (build_case_context, get_case_context, invalidate_case_cache, answer_question, get_file_fulltext,
-               web_search, cases_for_staff, pick_case_for_dm, group_history, dm_session, check_cooldown, linkify_answer,
+               web_search, cases_for_staff, _match_case, pick_case_for_dm, group_history, dm_session, check_cooldown, linkify_answer,
                _strip_markdown_plain, parse_need_rename, parse_need_addr, addr_lookup_text, is_affirmative, is_negative,
                set_pending_rename, pop_pending_rename, _sanitize_new_name, do_rename):
         assert callable(fn), fn
@@ -876,12 +903,21 @@ if __name__ == "__main__":
     assert _match_doc_name("cccd", ["GIAY KS.pdf", "CCCD-Hoang Thi Mo.pdf"]) == "CCCD-Hoang Thi Mo.pdf"
     c1 = {"applicant": "Nguyen Van A", "folder_id": "F1", "kind": "pro", "case_setup": True}
     c2 = {"applicant": "Tran Thi Bich", "folder_id": "F2", "kind": "pro", "case_setup": True}
+    c6 = {"applicant": "Hoàng Thị Mơ TEST6 1991", "folder_id": "F6", "kind": "pro", "case_setup": True}
+    c8 = {"applicant": "Hoàng Thị Mơ TEST8 1991", "folder_id": "F8", "kind": "pro", "case_setup": True}
     assert pick_case_for_dm("hỏi gì đó", [], None)[0] is None and pick_case_for_dm("x", [], None)[1]
     assert pick_case_for_dm("hồ sơ này sao rồi", [("P1", c1)], None)[0] is c1
     info, ask = pick_case_for_dm("hỏi về hồ sơ Tran Thi Bich đi", [("P1", c1), ("P2", c2)], None)
     assert info is c2 and ask is None
-    info, ask = pick_case_for_dm("hồ sơ chung chung", [("P1", c1), ("P2", c2)], None)
-    assert info is None and ask and "Tran Thi Bich" in ask and "Nguyen Van A" in ask
+    # gõ "test8" → chốt được dù 2 hồ sơ trùng tên cơ sở; gõ tên trùng → liệt kê đúng 2 case; câu không có tên → hỏi suông, KHÔNG liệt kê
+    info, ask = pick_case_for_dm("test8", [("P6", c6), ("P8", c8)], None)
+    assert info is c8 and ask is None
+    info, ask = pick_case_for_dm("kiểm tra lại địa chỉ hồ sơ Hoàng Thị Mơ TEST8 1991", [("P6", c6), ("P8", c8)], None)
+    assert info is c8 and ask is None
+    info, ask = pick_case_for_dm("hồ sơ Hoàng Thị Mơ sao rồi", [("P6", c6), ("P8", c8)], None)
+    assert info is None and ask and "TEST6" in ask and "TEST8" in ask
+    info, ask = pick_case_for_dm("kiểm tra lại địa chỉ", [("P6", c6), ("P8", c8)], None)
+    assert info is None and ask and "TEST6" not in ask and "TEST8" not in ask
     info, ask = pick_case_for_dm("vậy còn passport thì sao?", [("P1", c1), ("P2", c2)], "F2")
     assert info is c2 and ask is None
     reg = {"P1": {"kind": "pro", "case_setup": True, "staff": ["111", "222"], "applicant": "A", "folder_id": "F1"},

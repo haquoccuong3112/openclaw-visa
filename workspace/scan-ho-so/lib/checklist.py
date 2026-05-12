@@ -253,7 +253,8 @@ giữa các giấy tờ, và xuất báo cáo theo đúng format yêu cầu.
 - Tên khách hàng: {{APPLICANT}}
 - Nội dung OCR hồ sơ: cung cấp ở message tiếp theo dưới dạng JSON — mỗi phần tử là một giấy tờ với
   `ten` (tên file đã chuẩn hoá), `loai` (mã loại giấy tờ), `nguoi` (người trên giấy), `tom_tat`,
-  `du_lieu` (các trường trích từ OCR), `key_fields`.
+  `du_lieu` (các trường trích từ OCR), `key_fields`, `confidence` ("high"|"medium"|"low"),
+  `needs_review` (true ⇒ scan mờ / viết tay / phân loại chưa chắc — KHÔNG dùng giấy đó làm chuẩn để bắt lỗi giấy khác).
 
 # NGUYÊN TẮC LÀM VIỆC BẮT BUỘC
 
@@ -263,6 +264,10 @@ giữa các giấy tờ, và xuất báo cáo theo đúng format yêu cầu.
 2. **ĐỐI CHIẾU CHÉO TRIỆT ĐỂ**: Mọi thông tin trùng lặp giữa các giấy tờ
    (họ tên, ngày sinh, số CMND/CCCD, địa chỉ, tên cha mẹ...) phải được so
    khớp ký tự với ký tự. Một dấu cách thừa, một chữ lót thiếu = LỖI.
+   — **TRỪ KHI** một bên là giấy `needs_review=true` / `confidence`="low" / tờ TỰ KHAI / viết tay (`loai`="CV", biểu
+   mẫu khách tự ghi): khác biệt nhỏ kiểu đó nhiều khả năng chỉ là OCR đọc sai chữ viết tay → ghi 🟢/🟡 "OCR thấp tin
+   cậy — cần đối chiếu bản gốc", **KHÔNG phải lỗi 🔴**. Một tờ TỰ KHAI / viết tay KHÔNG phải CCCD / giấy chính thức kể
+   cả khi nó có ghi số CCCD — đừng dùng nó làm chuẩn để bắt lỗi giấy khác.
 
 3. **TÍNH TOÁN NGÀY THÁNG**: Mọi thời hạn phải tính từ ngày kiểm tra ở trên.
    Hiển thị rõ phép tính (VD: "Cấp 22/01/2026, đến {{TODAY}} = 3 tháng 20
@@ -312,7 +317,7 @@ giấy tờ, dạng:
 - [ ] Họ tên không dấu khớp 100% với CCCD/Khai sinh
 - [ ] Ngày sinh, giới tính khớp tuyệt đối
 - [ ] Nơi sinh (tỉnh) khớp với Khai sinh
-- [ ] Số CMND/CCCD ghi trong HC: là số 9 hay 12? Có khớp giấy tờ hiện hành?
+- [ ] Số CMND/CCCD ghi trong HC: số 9 cũ hay 12 mới — chỉ GHI NHẬN (lịch sử chuyển đổi giấy tờ), KHÔNG phải lỗi
 - [ ] Còn hạn ≥ 2 năm tính từ ngày dự kiến sử dụng?
 - [ ] Hình ảnh/chữ ký không tẩy xóa
 
@@ -327,16 +332,21 @@ giấy tờ, dạng:
 
 **A4. Lý lịch tư pháp (LLTP):**
 - [ ] Còn hạn 6 tháng tính từ ngày cấp đến NGÀY KIỂM TRA
-- [ ] Số CMND/CCCD trên LLTP khớp số hiện hành
+- [ ] Số CMND/CCCD trên LLTP: nếu là số 9 cũ (LLTP cấp đã lâu) thì bình thường — KHÔNG yêu cầu giải trình
 - [ ] Tên cha, mẹ, vợ/chồng khớp Khai sinh + Đăng ký kết hôn
 - [ ] Tình trạng: "Không có án tích"
 
 **A5. Xác nhận cư trú CT07:**
 - [ ] Còn hiệu lực ("Giấy này có giá trị đến hết ngày...")
-- [ ] Địa chỉ thường trú + nơi ở hiện tại khớp CCCD/LLTP
-- [ ] Bảng thành viên hộ: đầy đủ vợ/chồng/con? Mã định danh 12 số + ngày sinh
-  từng người khớp CCCD/KS của họ?
-- [ ] Quan hệ với chủ hộ có logic không
+- [ ] Địa chỉ thường trú + nơi ở hiện tại khớp CCCD/LLTP (áp dụng quy tắc địa giới ở mục 4 — tên cũ↔mới của CÙNG MỘT
+  nơi KHÔNG phải mâu thuẫn)
+- [ ] Đương đơn là NGƯỜI YÊU CẦU / người khai (ghi ở phần đầu giấy). Bảng "Các thành viên khác trong hộ gia đình" chỉ
+  liệt kê những NGƯỜI KHÁC trong hộ — **KHÔNG có tên đương đơn trong bảng đó là BÌNH THƯỜNG**, KHÔNG phải lỗi, KHÔNG
+  làm giấy "vô giá trị". Chỉ kiểm: mã định danh 12 số + ngày sinh từng người TRONG BẢNG có khớp CCCD/KS của họ không.
+- [ ] CHỦ HỘ có thể là bố/mẹ ruột, bố/mẹ chồng (vợ), anh/chị/em, hoặc chính vợ/chồng đương đơn — **đừng mặc định chủ
+  hộ là vợ/chồng của đương đơn**, và đừng báo "mâu thuẫn tên chồng/vợ" chỉ vì tên chủ hộ khác tên vợ/chồng ghi trên
+  giấy khác. Chỉ báo mâu thuẫn vợ/chồng khi MỘT trường ghi RÕ "vợ/chồng" (trên LLTP, ĐKKH, CCCD…) xung đột với một
+  trường ghi RÕ "vợ/chồng" khác.
 
 **A6. Đăng ký kết hôn (nếu có):**
 - [ ] Họ tên, ngày sinh vợ/chồng khớp 100% giấy tờ tùy thân
@@ -378,18 +388,19 @@ giấy tờ, dạng:
 
 ## BƯỚC 4: Rà soát trường hợp đặc biệt (BẮT BUỘC)
 
-1. **Mâu thuẫn CMND 9 số ↔ CCCD 12 số**: Nếu HC/Kết hôn dùng số 9 cũ, hiện
-   tại dùng số 12 → khách CẦN có Giấy xác nhận số CMND hoặc số 9 phải quét
-   được từ QR/chip CCCD hiện tại. → CẢNH BÁO
+1. **Số định danh cũ (9 số) và CCCD mới (12 số)**: hồ sơ có thể có cả hai (giấy cũ ghi số 9, giấy mới ghi số 12) — đây
+   là chuyện BÌNH THƯỜNG của quá trình chuyển đổi giấy tờ, **KHÔNG báo lỗi, KHÔNG yêu cầu khách bổ sung giấy xác nhận**.
+   (Chỉ lưu ý nếu trên CÙNG một giấy hiện hành lại có hai số khác nhau không ăn khớp — hiếm.)
 
-2. **Sai lệch địa chỉ giữa giấy cũ và mới**: Logic không? Đã update đúng
-   trên CT07?
+2. **Sai lệch địa chỉ giữa giấy cũ và mới**: dùng `_dia_gioi` (mục 4) — tên TRƯỚC vs SAU cải cách của CÙNG MỘT nơi
+   KHÔNG phải lỗi; chỉ báo nếu giấy cấp SAU mốc cải cách còn ghi đơn vị đã sáp nhập.
 
-3. **Chữ lót/tên gọi**: Bất kỳ sai khác dù 1 chữ lót → BÁO LỖI NGAY
+3. **Chữ lót/tên gọi**: sai khác giữa các GIẤY CHÍNH THỨC (CCCD, hộ chiếu, khai sinh, LLTP, CT07, ĐKKH) → BÁO LỖI;
+   nhưng nếu một bên là giấy `needs_review`/tự khai/viết tay → chỉ 🟢/🟡 "cần đối chiếu bản gốc" (xem mục 2 NGUYÊN TẮC).
 
-4. **Tên công ty trên BHXH ↔ Sao kê lương**: PHẢI trùng khớp tuyệt đối
+4. **Tên công ty trên BHXH ↔ Sao kê lương**: PHẢI trùng khớp tuyệt đối.
 
-5. **Địa giới hành chính sau 12/06/2025**: Đối chiếu danh sách 34 đơn vị mới
+5. **Địa giới hành chính sau 12/06/2025 (tỉnh) / 01/07/2025 (xã/phường)**: đối chiếu `_dia_gioi` / danh sách 34 đơn vị mới.
 
 # THAM KHẢO — ĐIỂM DANH HỒ SƠ THEO CHECKLIST FARM (ALLY)
 (đếm tự động từ dữ liệu OCR, coi là CHUẨN — KHÔNG được mâu thuẫn; trạng thái mỗi mục: "✅ đã có" /
@@ -497,6 +508,8 @@ def _trim_dataset_for_llm(dataset: list[dict]) -> list[dict]:
             "tom_tat": (d.get("tom_tat") or "")[:800],
             "du_lieu": d.get("du_lieu") or {},
             "key_fields": d.get("key_fields") or {},
+            "confidence": d.get("confidence", ""),       # "high"|"medium"|"low" — độ tin cậy OCR/phân loại
+            "needs_review": bool(d.get("needs_review")),  # True = scan mờ / viết tay / phân loại chưa chắc
         })
     return out
 
@@ -537,7 +550,8 @@ def _call_openrouter(model: str, system: str, user: str, timeout: int = 300,
 # ===========================================================================
 _PROFILE_EXTRACT_SYSTEM = """Bạn là trợ lý trích xuất & chuẩn hoá hồ sơ visa Canada (LMIA).
 Đầu vào (message kế tiếp): JSON liệt kê các giấy tờ đã OCR — mỗi phần tử có `ten`, `loai`,
-`nguoi`, `tom_tat`, `du_lieu`, `key_fields`.
+`nguoi`, `tom_tat`, `du_lieu`, `key_fields`, `confidence` ("high"|"medium"|"low") và `needs_review` (true = scan mờ /
+viết tay / phân loại chưa chắc).
 
 NHIỆM VỤ: gom toàn bộ dữ liệu thành MỘT JSON object hồ sơ thống nhất, theo schema dưới.
 
@@ -546,6 +560,11 @@ QUY TẮC TUYỆT ĐỐI:
   số tiền…) — copy chính xác từng ký tự, KHÔNG tóm tắt, KHÔNG diễn giải, KHÔNG tự "sửa" cho đẹp.
 - Nếu một thông tin xuất hiện khác nhau ở các giấy → giữ CẢ HAI dạng và ghi vào `notes` (vd "tên chồng:
   LLTP='Nguyễn Bá Thắng' vs CT07='Nguyễn Bá Thẳng' (dấu hỏi)").
+- Giấy nào `needs_review=true` / `confidence`="low" / là tờ TỰ KHAI (`loai`="CV", hoặc tiêu đề kiểu "Thông tin cá
+  nhân / gia đình (tự khai)") → vẫn copy giá trị nhưng GHI RÕ trong `notes`: "(OCR thấp tin cậy / tự khai — cần đối
+  chiếu bản gốc)". TUYỆT ĐỐI không coi giấy đó là nguồn chuẩn cho họ tên / số giấy tờ / địa chỉ khi nó lệch với một
+  giấy CHÍNH THỨC do cơ quan cấp (CCCD thật, hộ chiếu, khai sinh, LLTP, CT07…). Một tờ tự khai/viết tay KHÔNG phải
+  CCCD/giấy chính thức kể cả khi nó có ghi số CCCD.
 - Nếu OCR mờ/thiếu → để chuỗi rỗng "" hoặc mảng rỗng [], và ghi lý do vào `notes`.
 - Không bịa. Chỉ điền cái thật sự đọc được.
 - Trả về JSON object MỘT DÒNG, THUẦN (không markdown, không chữ ngoài JSON).
@@ -920,6 +939,12 @@ if __name__ == "__main__":
     print("coverage:", cov["have"], "/", cov["required"], "| missing:", len(cov["missing"]), "mục")
     p = _build_prompt("12/05/2026", "Nguyen Van Test", cov)
     assert "VAI TRÒ" in p and "PHẦN 4" in p and "12/05/2026" in p and "Nguyen Van Test" in p and "{{" not in p and "CHECKLIST HỒ SƠ FARM" in p and "_dia_gioi" in p
+    _plc = re.sub(r"\s+", " ", p.lower())  # gộp khoảng trắng để khỏi vướng wrap dòng
+    assert "đừng mặc định chủ hộ" in _plc and "không có tên đương đơn trong bảng đó" in _plc and "ocr thấp tin cậy" in _plc
+    assert "không yêu cầu khách bổ sung giấy xác nhận" in _plc  # bỏ quy tắc "Giấy xác nhận số CMND"
+    _t = _trim_dataset_for_llm([{"loai": "CV", "ten": "x", "needs_review": True, "confidence": "low",
+                                 "du_lieu": {}, "key_fields": {}, "tom_tat": "t"}])
+    assert _t[0].get("needs_review") is True and _t[0].get("confidence") == "low"
     print("prompt len:", len(p))
     # địa giới: build_dia_gioi qua lib.diadia
     _dg = build_dia_gioi(
