@@ -37,7 +37,7 @@ DOC_TYPE_PATTERNS: list[tuple[str, str, str]] = [
     (r"\bbhxh\b|bao hiem xa hoi", "BHXH", "Personal Docs"),
     (r"\bbhyt\b|bao hiem y te|the bao hiem y te", "BHYT", "Personal Docs"),
     (r"\biom\b", "IOM", "Personal Docs"),
-    (r"\bcv\b|curriculum vitae|so yeu ly lich|syll", "CV", "Personal Docs"),
+    (r"\bcv\b|curriculum vitae|so yeu ly lich|syll|thong tin ca nhan|tu khai|phieu thong tin|bieu mau", "CV", "Personal Docs"),
     (r"the tin dung|credit card|the visa|the mc|mastercard|visa card|the ngan hang", "The Visa-MC", "Personal Docs"),
     (r"bang khen|giay khen|huy chuong", "Bang khen", "Personal Docs"),
     (r"anh gia dinh|anh chup gia dinh|family photo|tiec sinh nhat|tiec day thang|happy full moon|happy 1 month|day thang", "Anh gia dinh", "Personal Docs"),
@@ -150,7 +150,7 @@ FILENAME_HINTS: list[tuple[str, str, str]] = [
     (r"\bgplx\b|bang\s*lai|giay\s*phep\s*lai\s*xe", "GPLX", "Personal Docs"),
     (r"\bxnct\b|cu\s*tru", "XNCT", "Personal Docs"),
     (r"\biom\b", "IOM", "Personal Docs"),
-    (r"\bsyll\b|so\s*yeu\s*ly\s*lich", "CV", "Personal Docs"),
+    (r"\bsyll\b|so\s*yeu\s*ly\s*lich|thong\s*tin\s*ca\s*nhan|to\s*khai", "CV", "Personal Docs"),
     (r"ho\s*chieu|passport", "Passport", "Personal Docs"),
     (r"the\s*tin\s*dung|credit\s*card|mastercard|visa\s*card|the\s*visa|the\s*mc", "The Visa-MC", "Personal Docs"),
     (r"\bdkkd\b|dang\s*ky\s*kinh\s*doanh|\bhtx\b", "DKKD", "Employment"),
@@ -172,12 +172,20 @@ def classify_doc_type(
     """Map Gemini's free-text doc_type → SOP tag + 1 of 4 top folders.
 
     Strategy:
+      0. Guard: a self-filled / hand-written form that only *mentions* CCCD info
+         (số CCCD, họ tên, địa chỉ…) is NOT a CCCD card → tag CV, needs_review.
       1. doc_type alone (high confidence) when Gemini gave a clear answer.
       2. STRONG filename hint (medium confidence) — always tried before falling
          to summary, so noisy summaries can't override an obvious filename.
       3. doc_type + filename loose match (medium).
       4. Summary as last resort (low, needs_review).
     """
+    # Pass 0: "tự khai/viết tay" + CCCD-ish wording → it's a personal-info form (CV), not the CCCD card.
+    _g_hay = strip_diacritics(f"{raw_doc_type or ''} {summary or ''}").lower()
+    if re.search(r"tu\s*khai|to\s*khai|viet\s*tay|bieu\s*mau|tu\s*dien|tu\s*ghi|tu\s*viet", _g_hay) and \
+       re.search(r"\bcccd\b|can\s*cuoc|chung\s*minh|\bcmnd\b|thong\s*tin\s*ca\s*nhan", _g_hay):
+        return Classification(tag="CV", folder="Personal Docs", confidence="medium", needs_review=True)
+
     is_unclear = (not raw_doc_type) or any(
         bad in (raw_doc_type or "").lower()
         for bad in ["chưa phân loại", "không xác định", "unknown"]

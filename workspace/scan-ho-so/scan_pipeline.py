@@ -156,7 +156,12 @@ def gemini_classify_file(path: Path, filename: str) -> dict:
     prompt = f"""Đọc trực tiếp file hồ sơ visa Canada đính kèm và trả về JSON MỘT DÒNG, THUẦN (không markdown, không giải thích ngoài JSON).
 
 Các trường:
-- doc_type: loại giấy tờ tiếng Việt
+- doc_type: loại giấy tờ tiếng Việt — PHÂN LOẠI THEO BẢN CHẤT GIẤY TỜ, KHÔNG theo các trường/thông tin mà nó nhắc tới.
+  • "Căn cước công dân"/"Hộ chiếu"/"Sổ tiết kiệm"/"Lý lịch tư pháp"/"Sao kê ngân hàng"/… CHỈ khi file ĐÚNG LÀ giấy tờ đó
+    (vd: CCCD = tấm thẻ in 2 mặt có ảnh chân dung + chip/QR; hộ chiếu = cuốn hộ chiếu; sổ tiết kiệm = cuốn sổ ngân hàng).
+  • Một tờ giấy / biểu mẫu do KHÁCH HÀNG TỰ KHAI / VIẾT TAY / TỰ ĐIỀN thông tin cá nhân (họ tên, ngày sinh, số CCCD,
+    địa chỉ, người thân…) → doc_type = "Thông tin cá nhân (tự khai)" (≈ sơ yếu lý lịch), KHÔNG phải "Căn cước công dân"
+    chỉ vì có ô "Số CCCD". Tương tự với các loại giấy khác — đừng vì file nhắc đến số/tên gì mà gán nhầm loại.
 - person: [{{"full_name":"...","date_of_birth":"..."}}]
 - summary_vi: tóm tắt 1-2 câu
 - key_fields: {{"số giấy tờ":"...","ngày cấp":"...","nơi cấp":"..."}}
@@ -167,7 +172,8 @@ Các trường:
   thanh_vien_ho_khau ([{{"ho_ten":"","ngay_sinh":"","so_dinh_danh":"","quan_he_voi_chu_ho":""}}]), giay_co_gia_tri_den,
   chu_tai_khoan, so_tai_khoan_hoac_so, so_tien, ky_han, ngay_dao_han, ngay_xac_nhan_so_du, so_du,
   ky_sao_ke_tu, ky_sao_ke_den, ten_cong_ty, ma_so_bhxh, giai_doan_dong_bhxh, ma_the_bhyt, bhyt_gia_tri_tu, bhyt_gia_tri_den,
-  tinh_trang_an_tich, co_dau_moc (true/false), co_chu_ky (true/false), visual_flags (["ảnh mờ","nghi tẩy xóa ...","thiếu chữ ký","thiếu dấu mộc",...])
+  tinh_trang_an_tich, la_to_khai (true nếu là tờ tự khai / biểu mẫu khách tự ghi; false nếu là giấy tờ chính thức do cơ quan cấp),
+  co_dau_moc (true/false), co_chu_ky (true/false), visual_flags (["ảnh mờ","nghi tẩy xóa ...","thiếu chữ ký","thiếu dấu mộc",...])
 
 Tên file: {filename}
 
@@ -352,7 +358,9 @@ def resolve_from_registry(chat_id: str) -> dict:
 def run_self_test() -> int:
     from lib.sop_naming import classify_doc_type, build_filename
     samples = [
-        ("Căn cước công dân", "", "CCCD.pdf"),
+        ("Căn cước công dân", "thẻ căn cước 2 mặt, có ảnh chân dung, có chip/QR", "CCCD.pdf"),
+        ("Thông tin cá nhân (tự khai)", "Tờ giấy khách hàng tự ghi họ tên, ngày sinh, số CCCD, địa chỉ", "info.jpg"),
+        ("Căn cước công dân tự khai viết tay", "khách hàng tự điền số CCCD và thông tin cá nhân", "x.jpg"),
         ("", "", "BIA DAT.pdf"),
         ("Sao kê ngân hàng", "", "sao ke.pdf"),
         ("Giấy chứng nhận đăng ký HTX", "", "DKKD.pdf"),
@@ -361,6 +369,11 @@ def run_self_test() -> int:
     for dt, summ, fn in samples:
         c = classify_doc_type(dt, summ, fn)
         print(f"{c.confidence:6} {c.folder:14} {build_filename(c.tag, 'Hoang Thi Mo', '.pdf'):40} <- {dt or fn!r}")
+    # regression: a self-filled / hand-written personal-info form must be CV, not CCCD
+    assert classify_doc_type("Thông tin cá nhân (tự khai)", "khách tự ghi số CCCD và địa chỉ", "info.jpg").tag == "CV"
+    assert classify_doc_type("Căn cước công dân tự khai viết tay", "khách hàng tự điền", "x.jpg").tag == "CV"
+    # ...but the real printed CCCD card must still be CCCD
+    assert classify_doc_type("Căn cước công dân", "thẻ căn cước 2 mặt có ảnh chân dung và chip", "cccd.jpg").tag == "CCCD"
     # checklist module sanity
     try:
         from lib import checklist as _ck

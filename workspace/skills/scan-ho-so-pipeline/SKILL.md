@@ -87,6 +87,14 @@ name), so a partial run can always be finished by running the same command again
   (`<Tag>[ <relation>][ <index>]-<Subject>[_ENG].<ext>`, e.g.
   `CCCD-Hoang Thi Mo.pdf`). Naming/classification logic is the maintained
   `~/.openclaw/workspace/scan-ho-so/lib/sop_naming.py` (single source of truth — don't reimplement).
+  > ⚠️ **Phân loại theo bản chất giấy tờ, không theo trường nó nhắc tới.** Một tờ giấy do khách **tự khai /
+  > viết tay / tự điền** thông tin cá nhân (họ tên, số CCCD, địa chỉ, người thân…) là tag **`CV`** ("Thông tin
+  > cá nhân / sơ yếu lý lịch" — mục 21 checklist FARM), KHÔNG phải `CCCD` — `CCCD` chỉ là tấm thẻ Căn cước công
+  > dân thật (2 mặt, có ảnh, chip/QR). Tương tự: `Hộ chiếu`/`Sổ tiết kiệm`/… chỉ cho giấy tờ thật, không phải
+  > vì file nhắc tới số/tên đó. Nếu một file vẫn bị phân loại sai, đổi tên về `CV-<Họ Tên>.ext` (hoặc
+  > `Khac-<Họ Tên>.ext` nếu không hợp `CV`) — giữ đúng quy tắc `<Loại>-<Họ Tên>.ext`, đừng đặt tên tự do
+  > kiểu "Thông tin cá nhân KH gửi.jpg". (`scan_pipeline.py` đã được chỉnh để Gemini + `classify_doc_type`
+  > tự nhận diện tờ tự khai → `CV` với cờ ⚠️ needs_review, nhưng vẫn nên rà lại.)
 - Other extensions (`.mov`, `.heic`, `.docx`, …) are still **uploaded**
   (classified from the filename, flagged `needs_review`) so nothing is lost.
 - Each file: up to `--retries` attempts with exponential backoff on any error.
