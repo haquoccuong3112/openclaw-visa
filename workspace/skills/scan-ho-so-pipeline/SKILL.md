@@ -95,6 +95,8 @@ name), so a partial run can always be finished by running the same command again
   > `Khac-<Họ Tên>.ext` nếu không hợp `CV`) — giữ đúng quy tắc `<Loại>-<Họ Tên>.ext`, đừng đặt tên tự do
   > kiểu "Thông tin cá nhân KH gửi.jpg". (`scan_pipeline.py` đã được chỉnh để Gemini + `classify_doc_type`
   > tự nhận diện tờ tự khai → `CV` với cờ ⚠️ needs_review, nhưng vẫn nên rà lại.)
+  > Một tấm **ảnh chân dung / ảnh thẻ của 1 người** (phông trắng/xanh, kiểu ảnh dán hồ sơ) là tag **`Anh the`**
+  > ("Ảnh thẻ 5x7" — mục 9 checklist FARM), KHÔNG phải `Khac`; ảnh chụp gia đình / nhóm người / tiệc → `Anh gia dinh`.
 - Other extensions (`.mov`, `.heic`, `.docx`, …) are still **uploaded**
   (classified from the filename, flagged `needs_review`) so nothing is lost.
 - Each file: up to `--retries` attempts with exponential backoff on any error.
