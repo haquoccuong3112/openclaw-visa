@@ -1,0 +1,23 @@
+# ~/.openclaw/ is mostly OpenClaw STATE + CREDENTIALS. Default: ignore EVERYTHING;
+# un-ignore only the things that are safe to publish (the agent workspace + a couple
+# harmless static dirs). NEVER add credentials/, identity/, telegram/, openclaw.json,
+# exec-approvals.json, agents/, logs/, tasks/, flows/, memory/, plugins/, devices/, ...
+/*
+!/.gitignore
+!/workspace/
+!/completions/
+!/canvas/
+
+# belt-and-suspenders: even if workspace/.gitignore is lost, never commit these
+workspace/scan-ocr.env
+workspace/google-service-account.json
+workspace/**/*.pem
+workspace/**/*.key
+workspace/scan-ho-so/runs/
+workspace/scan-ho-so/test-runs/
+workspace/scan-ho-so/group_registry.json
+workspace/scan-ho-so/group_registry.json.bak
+workspace/**/__pycache__/
+workspace/**/*.pyc
+workspace/**/*.bak
+workspace/**/*.bak-*

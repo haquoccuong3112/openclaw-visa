@@ -1,0 +1,17 @@
+[Unit]
+Description=Dong Hanh Processing Bot (@donghanhprocessingbot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cuong
+WorkingDirectory=/home/cuong/.openclaw/workspace/scan-ho-so
+ExecStart=/usr/bin/python3 /home/cuong/.openclaw/workspace/scan-ho-so/telegram_listener.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

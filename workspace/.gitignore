@@ -1,0 +1,30 @@
+# secrets — never commit (these live only on this box)
+scan-ocr.env
+google-service-account.json
+*.pem
+*.key
+
+# bot-generated / churny
+scan-ho-so/runs/
+scan-ho-so/test-runs/
+scan-ho-so/group_registry.json
+scan-ho-so/group_registry.json.bak
+
+# python caches
+**/__pycache__/
+*.pyc
+*.pyo
+
+# editor / "rm + heredoc" backups
+*.bak
+*.bak.*
+*.bak-*
+*.last-good
+
+# one-time bootstrap ritual (deleted after first run anyway)
+BOOTSTRAP.md
+
+# OS / node junk
+.DS_Store
+*.swp
+node_modules/

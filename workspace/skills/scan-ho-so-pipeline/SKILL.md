@@ -1,0 +1,197 @@
+---
+name: scan-ho-so-pipeline
+description: Process a batch of Đồng Hành / ALLY visa documents end-to-end — unzip the customer's .zip (or a folder of loose files), OCR + summarize each file with Gemini, rename it to the SOP convention, and upload it to the case's Google Drive folder (with .json/.md metadata sidecars). Use this whenever a customer (KH) sends a zip/files of hồ sơ that need sorting into Drive, and ALWAYS use it instead of doing the unzip/OCR/upload steps yourself with individual tool calls, because doing it by hand drops files. Triggers include "xử lý hồ sơ", "scan hồ sơ", a forwarded .zip of visa docs, "OCR và up lên Drive".
+---
+
+# Scan-hồ-sơ pipeline (consistent unzip → OCR → rename → upload to Drive)
+
+## Why this skill exists
+
+Doing this task by hand (unzip with one tool call, OCR each file with another,
+upload each with another) is **not reliable** — files get silently dropped:
+
+- a transient Gemini/Drive/Telegram error on one file → that file is skipped and
+  never mentioned;
+- non-`pdf/jpg/png` files in the zip (`.MOV`, `.HEIC`, `.docx`, …) get filtered
+  out and never uploaded — e.g. the `hoang_thi_mo3.zip` test set has
+  `IMG_2483.MOV` and the old path uploaded 3 of 4 files;
+- nothing ever reconciles "files in the zip" vs "files in Drive".
+
+The script below fixes all of that: it enumerates **every** real file, retries
+each one, keeps unsupported files (uploads them without OCR), writes a
+**manifest** covering every input file, and exits non-zero if anything is still
+failed so you know to re-run. Re-runs are safe (uploads skip by destination
+name), so a partial run can always be finished by running the same command again.
+
+## The procedure — follow exactly
+
+1. **Get the input locally.** Download the customer's `.zip` (or the loose
+   files into one directory). Note the absolute path.
+
+2. **Resolve the case Drive folder.** Each KH↔Pro group pair has a case folder
+   recorded in `~/scan-ho-so/group_registry.json` keyed by Telegram chat id
+   (field `folder_id`, plus `applicant`, `visa`, `drive_link`). Either pass the
+   chat id with `--from-registry`, or pass `--case-folder-id` + `--applicant`
+   directly. If you can't determine the case folder, ask — do **not** guess and
+   do **not** create a new top-level folder.
+
+3. **Run the pipeline:**
+
+   ```bash
+   python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py "<ZIP_OR_DIR>" \
+       --from-registry <TELEGRAM_CHAT_ID> \
+       --manifest /tmp/scan_manifest.json
+   ```
+
+   or, without the registry:
+
+   ```bash
+   python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py "<ZIP_OR_DIR>" \
+       --case-folder-id <DRIVE_FOLDER_ID> --applicant "Hoang Thi Mo" \
+       --manifest /tmp/scan_manifest.json
+   ```
+
+   Useful flags: `--dry-run` (enumerate + classify-by-filename only, no Gemini,
+   no Drive writes — use it first if you just want to see what's in the zip),
+   `--retries N` (default 3), `--case-id <str>` (metadata label),
+   `--self-test`.
+
+4. **Check the manifest — this is the consistency gate.** Read
+   `/tmp/scan_manifest.json`. It has `total_input_files`, `counts`
+   (`uploaded`, `uploaded-no-ocr`, `duplicate`, `failed`), `ok` (true ⇔ nothing
+   failed), and an `items` array with one entry per input file
+   (`src_name`, `new_name`, `folder`, `status`, `drive_link`, `needs_review`,
+   `error`). The script also exits `0` only when `failed == 0`.
+
+5. **If anything failed, re-run the exact same command** (up to ~2 more times).
+   Already-uploaded files are detected and skipped; only the unfinished ones are
+   retried. If files still fail after that, report them explicitly with their
+   error — never report the batch as "done" while `failed > 0`.
+
+6. **Report honestly.** Tell the user: how many files were in the zip, how many
+   uploaded, how many were already there (`duplicate`), how many uploaded
+   without OCR (`uploaded-no-ocr` — videos/docs that need a human to rename
+   properly), how many still failed, and the list of `needs_review` files.
+   Include the case Drive link from the registry. Do not claim every file was
+   processed unless `items` length == `total_input_files` and `failed == 0`
+   (the script asserts the first and you must check the second).
+
+## What the script guarantees
+
+- Walks `.zip` / directory **recursively**; skips only `__MACOSX/`, `._*`,
+  `.DS_Store`. Everything else is processed.
+- `pdf/jpg/jpeg/png` → Gemini OCR/understanding → classify (SOP tag + one of
+  `Personal Docs` / `Education` / `Asset` / `Employment`) → SOP filename
+  (`<Tag>[ <relation>][ <index>]-<Subject>[_ENG].<ext>`, e.g.
+  `CCCD-Hoang Thi Mo.pdf`). Naming/classification logic is the maintained
+  `~/scan-ho-so/lib/sop_naming.py` (single source of truth — don't reimplement).
+- Other extensions (`.mov`, `.heic`, `.docx`, …) are still **uploaded**
+  (classified from the filename, flagged `needs_review`) so nothing is lost.
+- Each file: up to `--retries` attempts with exponential backoff on any error.
+- `.json` + `.md` metadata sidecars go to `_Bot OCR & Metadata` inside the case
+  folder. A sidecar failure is recorded but does **not** fail the file.
+- A `manifest.json` is always written, with one entry per input file.
+
+## AI thẩm định hồ sơ (sau OCR)
+
+After the OCR/upload loop, if the batch contains at least one document whose tag is in the
+**CHECKLIST HỒ SƠ FARM** (auto-computed `CHECKLIST_DOC_TAGS` ≈ all tags referenced by `REQUIRED_DOCS`
+— `Passport`, `CCCD`, `GKS`, `GKH`, `XN hoc`, `XNCT`, `LLTP`, `GPLX`, `Anh the`, `Bang cap`, `BHXH`,
+`BHYT`, `IOM`, `CV`, `The Visa-MC`, `Bang khen`, `Anh gia dinh`, `So dat`, `So dat NN`,
+`HD cho-tang-thua ke`, `STK`, `XN so du`, `Sao ke`, `Ca vet xe`, `Vang`, `DKKD`, `Dai ly NS`,
+`Anh-video lam nong` — auto-debounce), the script runs an **AI thẩm định** over the *whole case*
+(it re-reads every `.json` sidecar in `_Bot OCR & Metadata`) — a **2-stage dual-model pipeline**
+to keep cost down:
+
+- **Stage 1 — extract & normalize** (`CHECKLIST_EXTRACT_MODEL`, default cheap `google/gemini-2.5-flash`):
+  reads the per-file `summary`+`extracted` of every doc → one compact normalized **profile JSON**
+  (`personal_info / passport / criminal_record / residence_ct07 / marriage / children / financial /
+  insurance / documents[] / visual_flags / notes`), keeping every value **verbatim** (no summarizing)
+  and pushing every suspected typo/variant into `notes`. (`extract_profile_data()` in checklist.py;
+  uses OpenRouter `response_format: json_object`.)
+- **Stage 2 — evaluate business logic** (`CHECKLIST_MODEL`, default `google/gemini-2.5-pro`; falls
+  back to `CHECKLIST_FALLBACK_MODEL` = `google/gemini-2.5-flash` on a bad id / transient error):
+  feeds the small profile JSON (not the bulky raw sidecars) + Cường's thẩm định prompt (vai trò
+  chuyên viên thẩm định LMIA · checklist Phần 1/2/3/4 · 34 đơn vị hành chính hiệu lực 12/06/2025) →
+  a **free-text Markdown report** (4 parts: BÁO CÁO THẨM ĐỊNH · ✅ PHẦN 1 chuẩn xác · ⏰ PHẦN 2
+  sắp/đã hết hạn · ⚠️ PHẦN 3 điểm mâu thuẫn cần làm rõ · 📌 PHẦN 4 tóm tắt & khuyến nghị), written
+  like a human reviewer. (`evaluate_profile_logic()`.) If Stage 1 fails, Stage 2 falls back to the
+  raw trimmed dataset — the pipeline never breaks.
+- Creates / overwrites a **Google Doc** `Bao cao tham dinh - <Applicant>` at the **root of the
+  case folder** (the Markdown is converted to a real Google Doc; an appendix is appended: the
+  **"Điểm danh hồ sơ theo CHECKLIST FARM"** table — all 26 FARM items with status `✅ đã có / ❌ THIẾU /
+  — không áp dụng / — chưa có (tùy chọn) / — sẽ làm sau`, denominator = **18 mục bắt buộc** — plus the
+  list of OCR'd files). The điểm danh is **deterministic** (`compute_coverage()` in checklist.py — matches
+  doc tags against `REQUIRED_DOCS`), runs on every thẩm định (even when the eval LLM errors), and is also
+  injected into the Stage-2 prompt as ground truth + shown in the Telegram summary.
+- Adds a `checklist` block to the manifest: `{ran, model (=eval model), extract_model, n_docs,
+  coverage:{have,required,missing,...}, report_link (= doc_link = md_link), report (the Markdown text),
+  profile (the Stage-1 JSON, or null on fallback), error}`.
+- This step is wrapped — a thẩm định failure **never** affects OCR/upload; it just records
+  `"checklist": {"ran": false, "error": ...}`.
+
+Logic/prompts live in `~/scan-ho-so/lib/checklist.py` (single source of truth — don't reimplement;
+Stage-2 prompt = `CHECKLIST_PROMPT_TEMPLATE`, Stage-1 prompt = `_PROFILE_EXTRACT_SYSTEM`).
+Orchestrator = `run_and_write()` (≈ `process_lmia_dossier`). Flags: `--no-checklist` (skip it
+entirely), `--checklist-only` (skip enumerate/OCR/upload; just (re)run the 2-stage thẩm định for the
+case — `INPUT` not required, use `--from-registry` or `--case-folder-id` + `--applicant`; used by the
+bot's `/check` command).
+
+## Bot chat — hỏi-đáp về hồ sơ KH (`~/scan-ho-so/lib/chat.py`)
+
+The bot also answers staff questions about a case, **as a professional Canadian visa officer** — kỹ càng,
+chính xác, **không nịnh** — using Gemini. **Where**: in a case's **Pro group** (only when the message
+**@mentions the bot** or is a **reply to a bot message** — plain chitchat is ignored), or via **DM** with
+the bot (staff asks about "the cases I'm assigned to"). Never answers chat in a **KH group** (the customer
+is there). **Access control**: Pro group = whoever is in the group is authorized for that case (the bot only
+ever loads that case's context); DM = the sender must be a known staff (Master Staff sheet / `STAFF_TELE_IDS`)
+and only gets cases where `reg[pro_chat_id]["staff"]` contains them — other cases are refused. **Data**: the
+case's OCR'd sidecar `.json` data (each with its `drive_link` so the bot can hand staff the link to a specific
+file) + the case-folder Drive link + the latest thẩm định Google Doc (exported as text) + the FARM điểm danh
+table + an **external web search** when needed (see below) — no re-OCR of the whole case, no extra sheets.
+The bot treats almost every staff message in this scope as case-related (only refuses clearly off-topic chitchat).
+**Models / tools**: chat/reasoning = `CHAT_MODEL` (default `google/gemini-2.5-pro`). Two opt-in follow-up
+mechanisms (the model emits exactly one line, the bot acts, then re-asks — max 1 round each):
+(1) `NEED_FILE: <name>` → bot re-OCRs that one file with `CHAT_SCAN_MODEL` (`google/gemini-2.5-flash-lite`,
+cached 30') for verbatim/deep detail; (2) `NEED_WEB: <query>` → bot does an external web search via the
+OpenRouter web plugin on `CHAT_WEB_MODEL` (`google/gemini-2.5-flash`, `CHAT_WEB_MAX_RESULTS`=4, cached 60')
+— used e.g. to verify ward/commune mergers under the 12/06/2025 administrative reform that aren't in
+`provinces_34.json`. (NEED_WEB is NOT used for info already in the file, nor for off-topic chitchat.)
+Case context cached per case (TTL 10', invalidated after each scan / `/check`); per-user cooldown
+`CHAT_USER_COOLDOWN` (3s) + `CHAT_CONCURRENCY` (4) semaphore. **Threading**: only the OpenRouter calls run
+in `asyncio.to_thread` (their own `httpx.Client`); all Google-Drive calls run on the event loop directly
+(the shared `httplib2`-based Drive client is NOT thread-safe — running it in a worker thread alongside the
+main thread's Drive use segfaults the process). Handler `on_chat_message` in `telegram_listener.py`
+(registered `group=2`, `filters.TEXT & ~COMMAND`).
+
+## Drive whitelist (must respect)
+
+The case folder lives inside the bot's sandbox (`OpenClaw` folder, id
+`1VUpoBV3fAudONv5mMFXYguRThKfOLyz7`, under `Bot folder` in the shared drive
+`ALLY PROCESSING`). The script only ever creates folders/files **under the case
+folder id you pass it** and never lists or modifies anything outside it. Don't
+point it at any folder id outside that sandbox.
+
+## Environment
+
+Reads `~/scan-ocr.env` automatically: needs `OPENROUTER_API_KEY` (Gemini via
+OpenRouter) and `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON with
+Drive scope — the thẩm định step creates a Google Doc). Override
+the OCR model with `GEMINI_MODEL` (default `google/gemini-2.5-flash-lite`),
+the thẩm định **Stage-1 extract** model with `CHECKLIST_EXTRACT_MODEL` (default
+`google/gemini-2.5-flash`), and the **Stage-2 reasoning** model with `CHECKLIST_MODEL`
+(default `google/gemini-2.5-pro`; falls back to `CHECKLIST_FALLBACK_MODEL`, default
+`google/gemini-2.5-flash`, on a bad model id or transient error). Override
+library/env locations with `SCAN_HO_SO_DIR`, `SCAN_OCR_ENV`, `SHARED_DRIVE_ID`
+if needed. The checklist requires `~/scan-ho-so/lib/checklist.py` and (optionally)
+`~/scan-ho-so/provinces_34.json`. Python deps: `google-api-python-client`,
+`google-auth`, `httpx` (already installed on this host).
+
+## Quick check
+
+```bash
+python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py --self-test
+python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py <some.zip> --dry-run --applicant "Test" --manifest /tmp/m.json
+# re-run only the checklist for a case (no OCR/upload):
+python3 ~/skills/scan-ho-so-pipeline/scripts/scan_zip.py --checklist-only --from-registry <CHAT_ID> --manifest /tmp/m.json
+```
