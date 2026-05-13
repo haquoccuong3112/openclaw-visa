@@ -414,6 +414,10 @@ PHONG CÁCH BẮT BUỘC:
   như trong DỮ LIỆU (trường `ten`), MỖI tên file 1 dòng, KHÔNG kèm chú thích/giải thích/URL. Hệ thống tự
   gắn link clickable vào đúng tên file đó. Khi nhân viên muốn mở CẢ hồ sơ → nhắc tới "thư mục hồ sơ"
   (link thư mục Drive của hồ sơ này: {{DRIVE_LINK}}).
+  ⚠️ TUYỆT ĐỐI: viết tên file EXACT từ {{DOC_LIST}} — KHÔNG bỏ suffix năm sinh (vd ` Test11 2007`),
+  KHÔNG bỏ prefix quan hệ (` con`/` bo`/` me`/` vc`), KHÔNG rút gọn ` Hoang Thi Mo` → ` Hoang Thi Mo`.
+  Nếu DOC_LIST có `CCCD-Hoang Thi Mo Test11 2007.pdf` thì viết đầy đủ vậy, KHÔNG được viết
+  `CCCD-Hoang Thi Mo.pdf` (file đó không tồn tại trong hồ sơ).
 - Mọi mốc thời gian / hạn → tính theo HÔM NAY = {{TODAY}} (dd/mm/yyyy).
 
 CÓ BỐN CƠ CHẾ ĐẶC BIỆT (mỗi cái = câu trả lời CHỈ gồm DUY NHẤT một dòng đúng cú pháp; chỉ dùng khi THẬT sự
@@ -678,33 +682,114 @@ def _coverage_block(cov: dict) -> str:
 # ===========================================================================
 _LINK_NOUN_RE = re.compile(r"\b(link|url|liên\s*kết|đường\s*dẫn)\b", re.IGNORECASE)
 _LINK_VERB_RE = re.compile(
-    r"\b(dẫn|gửi|gởi|cho|send|đưa|lấy|kiếm|tìm|tag|xem|mở|click)\b",
+    r"\b(dẫn|gửi|gởi|cho|send|đưa|lấy|kiếm|tìm|tag|xem|mở|click|đâu|where)\b",
     re.IGNORECASE,
 )
+# "Khách" / "đương đơn" / "kh" → chỉ list file của ĐƯƠNG ĐƠN (không bố/mẹ/con/vc/anh chị em).
+_APPLICANT_FILTER_RE = re.compile(
+    r"\b(khách|đương\s*đơn|\bkh\b|chính\s*chủ|của\s*kh)\b",
+    re.IGNORECASE,
+)
+# Doc-type aliases: tag SOP → list từ khoá (lower, đã strip diacritics nếu cần).
+# Build từ data/doc_types.yaml `description` field (tag name + alias VN/EN).
+DOC_TYPE_ALIASES: dict[str, list[str]] = {
+    "CCCD":               ["cccd", "căn cước", "can cuoc", "cmnd"],
+    "Passport":           ["passport", "hộ chiếu", "ho chieu", " hc "],
+    "GKS":                ["khai sinh", "trích lục khai sinh", "gks"],
+    "GKH":                ["đăng ký kết hôn", "kết hôn", "gkh", "hôn thú"],
+    "Ly hon":             ["ly hôn", "ly hon"],
+    "XN hoc":             ["xác nhận học", "xn học", "giấy xn học sinh"],
+    "XNCT":               ["cư trú", "ct07", "xnct", "xác nhận cư trú"],
+    "LLTP":               ["lý lịch", "ly lich", "lltp", "phiếu lý lịch"],
+    "Hien mau":           ["hiến máu", "hien mau"],
+    "GPLX":               ["bằng lái", "bang lai", "gplx", "giấy phép lái"],
+    "Anh the":            ["ảnh thẻ", "anh the", "ảnh 5x7", "ảnh chân dung"],
+    "BHXH":               ["bhxh", "bảo hiểm xã hội", "bhxh tự nguyện"],
+    "BHYT":               ["bhyt", "bảo hiểm y tế", "thẻ bhyt"],
+    "IOM":                ["iom", "khám iom"],
+    "CV":                 ["sơ yếu", "syll", "cv", "thông tin cá nhân", "tự khai"],
+    "The Visa-MC":        ["thẻ visa", "mastercard", "the visa", "thẻ tín dụng"],
+    "Bang khen":          ["bằng khen", "bang khen", "giấy khen", "thư cảm ơn"],
+    "Anh gia dinh":       ["ảnh gia đình", "anh gia dinh", "family photo"],
+    "Bang cap":           ["bằng cấp", "bang cap", "bằng tốt nghiệp", "diploma"],
+    "So dat":             ["sổ đỏ", "so do", "sổ đất", "gcnqsd", "sổ hồng"],
+    "HD cho-tang-thua ke": ["hợp đồng cho", "tặng đất", "thừa kế", "hd cho", "hd tặng"],
+    "STK":                ["sổ tiết kiệm", "so tiet kiem", "stk"],
+    "XN so du":           ["xác nhận số dư", "xn số dư", "xnsd"],
+    "Ca vet xe":          ["cà vẹt", "ca vet", "đăng ký xe"],
+    "Vang":               ["mua vàng", "hoá đơn vàng", " sjc "],
+    "So dat NN":          ["đất nông nghiệp", "sổ đất nn", "đất canh tác"],
+    "DKKD":               ["đăng ký kinh doanh", "dkkd", "htx"],
+    "Dai ly NS":          ["đại lý nông sản", "đại lý phân bón", "đại lý"],
+    "Anh-video lam nong": ["ảnh nông", "video nông", "ảnh làm nông", "video làm nông"],
+    "Sao ke":             ["sao kê", "sao ke", "sao kê ngân hàng"],
+    "HDLD":               ["hợp đồng lao động", "hdld"],
+}
 
 
-def _try_link_intent(question: str, name_to_link: dict | None) -> str | None:
-    """Nếu câu hỏi là yêu cầu LINK + có nhắc ít nhất 1 filename khớp `name_to_link`
-    → trả danh sách tên file (1/dòng, ĐÚNG y nguyên trong sidecar). Trả None nếu
-    không khớp intent hoặc không có filename khớp (để LLM xử lý tiếp)."""
+def _detect_doc_type(q: str) -> str | None:
+    """Tìm tag doc type được nhắc trong câu hỏi (lowercase substring match).
+    Ưu tiên tag có alias DÀI hơn (vd "khai sinh" trước "cv" cho câu 'khai sinh cv')."""
+    q_lower = " " + q.lower() + " "   # đệm khoảng trắng để match alias có space đầu/cuối
+    matched_tags: list[tuple[int, str]] = []   # (alias_len, tag)
+    for tag, aliases in DOC_TYPE_ALIASES.items():
+        for alias in aliases:
+            if alias.lower() in q_lower:
+                matched_tags.append((len(alias), tag))
+                break
+    if not matched_tags:
+        return None
+    matched_tags.sort(reverse=True)   # alias dài nhất thắng
+    return matched_tags[0][1]
+
+
+def _try_link_intent(question: str, name_to_link: dict | None,
+                      dataset: list[dict] | None = None) -> str | None:
+    """Bypass LLM khi staff yêu cầu link file cụ thể HOẶC list file theo doc type.
+
+    Mode 1 (cũ): câu có cả LINK noun + verb + tên file → list filename match.
+    Mode 2 (mới): câu có verb + doc type → list mọi file thuộc tag đó trong case.
+                  Nếu có "khách/đương đơn/kh" → filter chỉ file của đương đơn (no relation).
+
+    Trả `\\n`-joined filenames, hoặc None nếu không khớp → caller fallback LLM."""
     q = (question or "").strip()
     if not q or not name_to_link:
         return None
-    if not (_LINK_NOUN_RE.search(q) and _LINK_VERB_RE.search(q)):
-        return None
-    matched: list[str] = []
-    seen: set[str] = set()
-    for ten in sorted((t for t in name_to_link if t), key=len, reverse=True):
-        link = name_to_link.get(ten) or ""
-        if not link or ten in seen:
-            continue
-        stem = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", ten)
-        if ten in q or (stem and stem != ten and stem in q):
-            matched.append(ten)
-            seen.add(ten)
-    if not matched:
-        return None
-    return "\n".join(matched)
+    has_link_noun = bool(_LINK_NOUN_RE.search(q))
+    has_verb = bool(_LINK_VERB_RE.search(q))
+
+    # Mode 1 — noun + verb + filename trong câu (cũ)
+    if has_link_noun and has_verb:
+        matched: list[str] = []
+        seen: set[str] = set()
+        for ten in sorted((t for t in name_to_link if t), key=len, reverse=True):
+            link = name_to_link.get(ten) or ""
+            if not link or ten in seen:
+                continue
+            stem = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", ten)
+            if ten in q or (stem and stem != ten and stem in q):
+                matched.append(ten)
+                seen.add(ten)
+        if matched:
+            return "\n".join(matched)
+
+    # Mode 2 — verb + doc type → list mọi file thuộc tag đó
+    if has_verb and dataset:
+        doc_tag = _detect_doc_type(q)
+        if doc_tag:
+            applicant_only = bool(_APPLICANT_FILTER_RE.search(q))
+            matches = []
+            for d in dataset:
+                if (d.get("tag") or d.get("loai")) != doc_tag:
+                    continue
+                if applicant_only and (d.get("relation") or ""):
+                    continue   # bỏ file của người thân (CCCD bố/mẹ…)
+                ten = d.get("ten") or d.get("new_name") or ""
+                if ten and ten in name_to_link:
+                    matches.append(ten)
+            if matches:
+                return "\n".join(matches)
+    return None
 
 
 # ===========================================================================
@@ -780,7 +865,7 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
                     return "Đã huỷ đổi tên."
                 # không phải ok/huỷ → bỏ pending, trả lời câu hỏi như bình thường
         # ── Yêu cầu LINK của file cụ thể? → bypass LLM, linkify sẽ tự gắn <a> ──
-        _li = _try_link_intent(question, ctx.get("name_to_link") or {})
+        _li = _try_link_intent(question, ctx.get("name_to_link") or {}, ctx.get("docs") or [])
         if _li:
             return _li
         # ── Gọi LLM: stream nếu caller pass stream_callback (cho Telegram edit_message UX) ──
@@ -927,6 +1012,44 @@ def linkify_answer(text: str, name_to_link: dict | None = None, folder_link: str
     def _anchor(url: str, txt: str) -> str:
         return f'<a href="{html.escape(url, quote=True)}">{html.escape(txt)}</a>'
 
+    def _fuzzy_at(start: int) -> tuple[str, int] | None:
+        """Tại vị trí `start`, tìm token có prefix khớp 1 file duy nhất trong `surfaces`
+        → trả (full_surface, token_len). Wrap với SURFACE ĐẦY ĐỦ thay vì token rút gọn.
+
+        Giải quyết hallucination LLM (vd "CCCD-Hoang Thi Mo" thiếu " Test11 2007"):
+        bot trả tên file rút gọn → linkify wrap thành link đúng file thật.
+
+        Tokenization: greedy đến next stop punct (newline / `,;:!?()[]{}"'`).
+        Boundary check: yêu cầu token ≥8 chars + chứa `-` hoặc digit (signature filename).
+        Disambiguation: nếu nhiều surface khớp prefix nhưng cùng drive_link (vd full + stem)
+        → coi là 1 file duy nhất, dùng surface DÀI NHẤT làm anchor text."""
+        # Tìm các vị trí boundary (stop char) từ start tới EOF
+        boundaries: list[int] = []
+        j = start
+        while j < n:
+            if text[j] in "\n\r,;:!?()[]{}\"'":
+                boundaries.append(j)
+            j += 1
+        boundaries.append(n)   # EOF cũng là boundary
+        # Thử token dài nhất trước
+        for end in sorted(boundaries, reverse=True):
+            if end <= start:
+                continue
+            token = text[start:end].rstrip()
+            if len(token) < 8:
+                continue
+            if "-" not in token and not any(c.isdigit() for c in token):
+                continue
+            candidates = [s for s in surfaces if len(s) > len(token) and s.startswith(token)]
+            if not candidates:
+                continue
+            # Dedupe theo drive_link: nếu nhiều surface khớp nhưng cùng file → OK
+            unique_links = {by_surface.get(s) for s in candidates}
+            if len(unique_links) == 1:
+                matched_surface = max(candidates, key=len)
+                return (matched_surface, end - start)
+        return None
+
     out: list[str] = []
     i, n = 0, len(text)
     while i < n:
@@ -948,6 +1071,13 @@ def linkify_answer(text: str, name_to_link: dict | None = None, folder_link: str
         if hit:
             out.append(_anchor(by_surface[hit], hit))
             i += len(hit)
+            continue
+        # Fuzzy fallback: LLM viết tên file thiếu suffix/prefix → wrap với surface đầy đủ
+        fuzzy = _fuzzy_at(i)
+        if fuzzy:
+            matched_surface, token_len = fuzzy
+            out.append(_anchor(by_surface[matched_surface], matched_surface))
+            i += token_len
             continue
         out.append(html.escape(text[i], quote=False))
         i += 1
@@ -985,6 +1115,50 @@ if __name__ == "__main__":
     assert _try_link_intent("mở giùm CCCD-Tran Van Huy.pdf", _n2l) is None     # không có noun link/url
     assert _try_link_intent("", _n2l) is None
     assert _try_link_intent("dẫn link CCCD-Tran Van Huy.pdf", {}) is None     # name_to_link rỗng
+
+    # === Mode 2 — doc-type query (mới) ===
+    _n2l_case = {
+        "CCCD-Hoang Thi Mo Test11 2007.pdf": "https://drive.google.com/file/d/CC1/view",
+        "CCCD con-Hoang Thi Mo.pdf":          "https://drive.google.com/file/d/CC2/view",
+        "Passport-Hoang Thi Mo.pdf":          "https://drive.google.com/file/d/P1/view",
+        "LLTP-Hoang Thi Mo.pdf":              "https://drive.google.com/file/d/L1/view",
+    }
+    _dataset_case = [
+        {"tag": "CCCD",     "ten": "CCCD-Hoang Thi Mo Test11 2007.pdf", "relation": None},
+        {"tag": "CCCD",     "ten": "CCCD con-Hoang Thi Mo.pdf",          "relation": "con"},
+        {"tag": "Passport", "ten": "Passport-Hoang Thi Mo.pdf",          "relation": None},
+        {"tag": "LLTP",     "ten": "LLTP-Hoang Thi Mo.pdf",              "relation": None},
+    ]
+    # "cho tôi CCCD" → list tất cả CCCD (2 file)
+    res = _try_link_intent("cho tôi cccd", _n2l_case, _dataset_case)
+    assert res and "CCCD-Hoang Thi Mo Test11 2007.pdf" in res and "CCCD con-Hoang Thi Mo.pdf" in res, res
+    # "cho tôi cccd khách" → chỉ đương đơn (no relation) → chỉ 1 file
+    res2 = _try_link_intent("cho tôi cccd khách", _n2l_case, _dataset_case)
+    assert res2 == "CCCD-Hoang Thi Mo Test11 2007.pdf", res2
+    # "lấy passport" → 1 file Passport
+    assert _try_link_intent("lấy passport", _n2l_case, _dataset_case) == "Passport-Hoang Thi Mo.pdf"
+    # "đưa LLTP" → 1 file LLTP
+    assert _try_link_intent("đưa lltp", _n2l_case, _dataset_case) == "LLTP-Hoang Thi Mo.pdf"
+    # "passport đâu" → verb "đâu" + tag → match
+    assert _try_link_intent("passport đâu", _n2l_case, _dataset_case) == "Passport-Hoang Thi Mo.pdf"
+    # "link" alone (chỉ noun, no verb, no dataset clue) → None
+    assert _try_link_intent("link", _n2l_case, _dataset_case) is None
+    # "cccd" alone (no verb) → None
+    assert _try_link_intent("cccd", _n2l_case, _dataset_case) is None
+    # "đổi tên file LLTP" — có verb "đổi" không trong _LINK_VERB_RE, no link noun → None
+    assert _try_link_intent("đổi tên file LLTP", _n2l_case, _dataset_case) is None
+
+    # === Fuzzy match trong linkify_answer ===
+    # LLM viết "CCCD-Hoang Thi Mo" thiếu " Test11 2007.pdf" → fuzzy wrap với surface đầy đủ
+    _html = linkify_answer("CCCD-Hoang Thi Mo", _n2l_case, "")
+    assert '<a href' in _html and "CCCD-Hoang Thi Mo Test11 2007.pdf" in _html, _html
+    # Multiple matches (CCCD-… và CCCD con-…) — text "CCCD" 4 chars < 8 → KHÔNG wrap fuzzy
+    _html2 = linkify_answer("CCCD", _n2l_case, "")
+    assert '<a' not in _html2, _html2
+    # Exact match vẫn hoạt động (chính xác hơn fuzzy)
+    _html3 = linkify_answer("Passport-Hoang Thi Mo.pdf", _n2l_case, "")
+    assert '<a href' in _html3 and "Passport-Hoang Thi Mo.pdf" in _html3, _html3
+    print("link intent Mode 2 + fuzzy linkify OK")
     s = (_OFFICER_SYSTEM.replace("{{TODAY}}", "12/05/2026")
          .replace("{{DRIVE_LINK}}", "https://drive.google.com/x").replace("{{DOC_LIST}}", "a.pdf, b.pdf"))
     assert "{{" not in s and "12/05/2026" in s and "a.pdf, b.pdf" in s and "drive.google.com/x" in s
