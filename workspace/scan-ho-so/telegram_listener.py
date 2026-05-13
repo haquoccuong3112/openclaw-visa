@@ -73,7 +73,7 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 # ── Project lib ──────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.google_clients import drive
-from lib.drive_helpers import get_or_create_folder, list_folder, download_file_bytes, move_file
+from lib.drive_helpers import get_or_create_folder, list_folder, download_file_bytes, move_file, invalidate_list_cache
 from lib import chat as chatmod
 
 REGISTRY_LOCK = asyncio.Lock()
@@ -802,7 +802,10 @@ def summarize_manifest(m: dict, drive_link: str = "") -> str:
     items = m.get("items", []) or []
     total = m.get("total_input_files", len(items))
     no_ocr = c.get("uploaded-no-ocr", 0)
-    dup, failed = c.get("duplicate", 0), c.get("failed", 0)
+    split_n = c.get("uploaded-split", 0)
+    dup = c.get("duplicate", 0)
+    dup_hash = c.get("duplicate-by-hash", 0)
+    failed = c.get("failed", 0)
     review = [it for it in items if it.get("needs_review")]
     lines: list[str] = []
     if failed == 0:
@@ -811,6 +814,10 @@ def summarize_manifest(m: dict, drive_link: str = "") -> str:
         lines.append(html.escape(f"⚠️ Đã xử lý {total - failed}/{total} file — {failed} file LỖI, sẽ chạy lại"))
     if review:
         lines.append(f"⚠️ <b>{len(review)} file cần kiểm tra thủ công</b> — danh sách bên dưới có icon ⚠️.")
+    if split_n:
+        lines.append(html.escape(f"   (✂ {split_n} file tách từ PDF gộp nhiều loại)"))
+    if dup_hash:
+        lines.append(html.escape(f"   (🔁 {dup_hash} file trùng nội dung — skip upload)"))
     extra = []
     if no_ocr: extra.append(f"{no_ocr} file không OCR (cần kiểm tra tên)")
     if dup:    extra.append(f"{dup} file đã có sẵn")
@@ -970,7 +977,8 @@ async def _flush_batch_after(context, chat_id, batch, my_gen: int, delay: float)
         c = manifest.get("counts", {}) or {}
         logger.info(f"Scan done batch {chat_id} ({len(files)} file): "
                     f"total={manifest.get('total_input_files')} uploaded={c.get('uploaded',0)} "
-                    f"no_ocr={c.get('uploaded-no-ocr',0)} dup={c.get('duplicate',0)} "
+                    f"split={c.get('uploaded-split',0)} no_ocr={c.get('uploaded-no-ocr',0)} "
+                    f"dup={c.get('duplicate',0)} dup_hash={c.get('duplicate-by-hash',0)} "
                     f"failed={c.get('failed',0)}")
     except Exception as e:
         logger.error(f"_flush_batch_after {chat_id}: {e}", exc_info=True)
@@ -1145,6 +1153,9 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         try:
+            # Long-lived bot process: _LIST_CACHE có thể stale (lần 1 thấy rỗng → cache rỗng;
+            # staff dump file → cache cũ vẫn rỗng → tin "đang trống" sai). Luôn refresh.
+            invalidate_list_cache(old_file_id)
             files = list_folder(old_file_id, drive_id=SHARED_DRIVE_ID)
         except Exception as e:  # noqa: BLE001
             logger.error(f"/oldfile list Old File failed for {chat_id}: {e}", exc_info=True)
@@ -1236,7 +1247,8 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             c = manifest.get("counts", {}) or {}
             logger.info(f"OLDFILE pro_chat={chat_id} case={applicant!r} "
                         f"N_in={len(downloaded)} uploaded={c.get('uploaded',0)} "
-                        f"no_ocr={c.get('uploaded-no-ocr',0)} dup={c.get('duplicate',0)} "
+                        f"split={c.get('uploaded-split',0)} no_ocr={c.get('uploaded-no-ocr',0)} "
+                        f"dup={c.get('duplicate',0)} dup_hash={c.get('duplicate-by-hash',0)} "
                         f"failed={c.get('failed',0)}")
         except Exception as e:  # noqa: BLE001
             logger.error(f"/oldfile {chat_id}: {e}", exc_info=True)
@@ -1416,6 +1428,22 @@ def _self_test_summary() -> None:
                                           "needs_review": False, "drive_link": "https://z"}]},
                               drive_link="")
     assert "cần kiểm tra thủ công" not in out2, out2
+    # Fix B — count uploaded-split + duplicate-by-hash trong summary
+    out3 = summarize_manifest({"total_input_files": 1,
+                               "counts": {"uploaded-split": 3, "duplicate-by-hash": 2},
+                               "items": [{"src_name": "big.pdf", "new_name": "CCCD-Foo.pdf",
+                                          "tag": "CCCD", "status": "uploaded-split",
+                                          "split_from": "big.pdf", "split_pages": "1-2",
+                                          "needs_review": False, "drive_link": "https://a"}]},
+                              drive_link="")
+    assert "tách từ PDF" in out3, out3
+    assert "trùng nội dung" in out3, out3
+    # Fix A — invalidate_list_cache phải xoá entry, không raise nếu key không có
+    from lib.drive_helpers import invalidate_list_cache, _LIST_CACHE
+    _LIST_CACHE["__test_x__"] = {"foo": "bar"}
+    invalidate_list_cache("__test_x__")
+    assert "__test_x__" not in _LIST_CACHE
+    invalidate_list_cache("nonexistent")  # không raise
 
 
 def main():

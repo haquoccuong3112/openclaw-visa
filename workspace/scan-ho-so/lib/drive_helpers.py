@@ -33,6 +33,13 @@ def get_or_create_folder(name: str, parent_id: str, drive_id: str | None = None)
     return fid
 
 
+def invalidate_list_cache(parent_id: str) -> None:
+    """Bỏ entry cache list của folder `parent_id` — buộc call kế tiếp `list_folder` đi Drive.
+    Cần thiết cho các flow long-lived (bot process) khi folder content thay đổi giữa các lần list
+    (vd staff dump file mới vào `Old File/` giữa 2 lần /oldfile)."""
+    _LIST_CACHE.pop(parent_id, None)
+
+
 def list_folder(parent_id: str, drive_id: str | None = None) -> dict[str, str]:
     """List all non-folder files in parent → {name: file_id}. Cached per process."""
     if parent_id in _LIST_CACHE:
