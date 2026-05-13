@@ -37,6 +37,15 @@ name), so a partial run can always be finished by running the same command again
    directly. If you can't determine the case folder, ask — do **not** guess and
    do **not** create a new top-level folder.
 
+   > **Cách bot nhận diện nhóm KH/Pro** (`parse_group_title()` trong `telegram_listener.py`):
+   > phân biệt KH vs Pro bằng chữ `Pro` (case-insensitive) trong tên nhóm; hỗ trợ các prefix
+   > `DH Pro` / `DongHanh` / `Đồng Hành Pro` / `Đồng Hành`, em-dash `–` và en-dash `-`, token
+   > `KH` (vd `DongHanh WP2Y - KH Trần Đăng Sự 2006`). Chương trình nhận diện: `WP\d+[mMyY]?`
+   > (WP10m, WP2Y…), `HighSkilled`, `FARM`, cùng các code visa truyền thống (SP/VP/PR/SUV/TRV/…).
+   > Pair KH↔Pro qua `(applicant.lower(), visa.upper())` — 2 nhóm phải đặt cùng tên KH + visa.
+   > Nếu tên thiếu năm sinh hoặc thiếu hẳn → vẫn đăng ký nhóm, ô tên/năm sinh trong sheet để
+   > trống (visa vẫn bắt buộc). Self-test: `python3 telegram_listener.py --self-test`.
+
 3. **Run the pipeline:**
 
    ```bash

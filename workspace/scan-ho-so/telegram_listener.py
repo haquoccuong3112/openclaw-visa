@@ -3,10 +3,20 @@
 Dong Hanh Processing Bot v2 - @donghanhprocessingbot
 
 Luồng tự động khi bot được add vào 2 nhóm:
-  - Nhóm KH:  "Hoàng Thị Mơ TEST7 1991 WP10m - C Liên"
-  - Nhóm Pro: "DH Pro WP10m - Hoàng Thị Mơ TEST7 1991"
 
-Bot tự parse tên nhóm → kết nối cặp KH↔Pro theo (tên KH + visa type)
+  Nhóm Pro (staff): có chữ "Pro" trong title — vd:
+    - "DH Pro WP10m - Hoàng Thị Mơ TEST7 1991"
+    - "DH Pro HighSkilled - Lê Văn Hậu 1991"
+    - "DH Pro WP2Y – Trần Đăng Sự 2006"        (em/en-dash cũng được)
+
+  Nhóm KH (khách): KHÔNG có chữ "Pro" — vd:
+    - "Hoàng Thị Mơ TEST7 1991 WP10m - C Liên"
+    - "DongHanh WP2Y - KH Trần Đăng Sự 2006"
+    - "DongHanh HighSkilled - KH Lê Văn Hậu 1991"
+
+Parser trích: tên KH (kèm năm sinh nếu có), chương trình (visa).
+Nếu tên thiếu → vẫn đăng ký nhóm, ô tên/năm sinh để trống trong sheet.
+Pair KH↔Pro: cùng (applicant.lower(), visa.upper()).
 
 Khi bot join cặp nhóm mới:
   1. Tạo Drive folder cho case
@@ -127,45 +137,69 @@ def save_registry(reg: dict):
     REGISTRY_PATH.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # ── Parse group title ─────────────────────────────────────────────────────────
-# KH pattern:  "<Tên KH> <Visa> - <Agent>"
-# Pro pattern: "DH Pro <Visa> - <Tên KH>"
+# Phân biệt KH vs Pro bằng chữ "Pro" (case-insensitive) trong title.
+# Hỗ trợ nhiều prefix: "DH Pro", "DongHanh", "Đồng Hành Pro", "Đồng Hành"; cả
+# em-dash/en-dash; cả "KH" token trên nhánh KH. Visa/chương trình giữ casing đẹp
+# qua _canon_visa(); pair_key vẫn dùng .upper() nội bộ.
 VISA_RE = re.compile(
-    r'\b(WP\d+[mMyY]?|WP|SP|VP|PR|SUV|TRV|LMIA|SOWP|IEC|PNP)\b',
-    re.IGNORECASE
+    r'\b(WP\d+[mMyY]?|WP|SP|VP|PR|SUV|TRV|LMIA|SOWP|IEC|PNP'
+    r'|High\s*Skilled|FARM)\b',
+    re.IGNORECASE,
 )
+
+_DASH_RE = re.compile(r'[‐-―−]')          # ‐ ‑ ‒ – — ― −
+_PRO_RE = re.compile(r'\bpro\b', re.IGNORECASE)
+_PREFIX_MARKER_RE = re.compile(
+    r'\b(?:DH|DongHanh|Đồng\s*Hành)\s*Pro\b'             # "DH Pro" / "DongHanh Pro" / "Đồng Hành Pro"
+    r'|\b(?:DongHanh|Đồng\s*Hành)\b',                    # "DongHanh" / "Đồng Hành" (KH side)
+    re.IGNORECASE,
+)
+_KH_MARKER_RE = re.compile(r'(?<![A-Za-zÀ-ỹ])KH(?![A-Za-zÀ-ỹ])')
+_YEAR_RE = re.compile(r'\b(19\d{2}|20\d{2})\b')
+
+
+def _canon_visa(raw: str) -> str:
+    """Chuẩn hoá form hiển thị: 'wp10m' → 'WP10M', 'high skilled' → 'HighSkilled', 'farm' → 'FARM'."""
+    s = re.sub(r'\s+', '', raw)
+    if re.fullmatch(r'(?i)highskilled', s):
+        return "HighSkilled"
+    return s.upper()
+
 
 def parse_group_title(title: str) -> dict | None:
     """
     Returns dict with keys: kind ('kh'|'pro'), applicant, visa, raw_title
-    or None if not recognized.
+    or None if not recognized (cần có visa để pair KH↔Pro).
     """
-    if not title:
+    t0 = (title or "").strip()
+    if not t0:
         return None
-    t = title.strip()
-
-    # Pro: starts with "DH Pro"
-    if re.match(r'^DH\s+Pro\b', t, re.IGNORECASE):
-        # "DH Pro WP10m - Hoàng Thị Mơ TEST7 1991"
-        # strip "DH Pro"
-        rest = re.sub(r'^DH\s+Pro\s*', '', t, flags=re.IGNORECASE).strip()
-        vm = VISA_RE.search(rest)
-        visa = vm.group(0).upper() if vm else ""
-        # applicant = part after " - "
-        parts = re.split(r'\s*-\s*', rest, maxsplit=1)
-        applicant = parts[1].strip() if len(parts) > 1 else rest
-        if vm:
-            applicant = re.sub(VISA_RE, '', applicant).strip(" -")
-        return {"kind": "pro", "applicant": applicant, "visa": visa, "raw_title": t}
-
-    # KH: "<Tên> <Visa> - <Agent>"  (no "DH Pro" prefix)
+    t = _DASH_RE.sub('-', t0)                            # em/en-dash → hyphen
+    is_pro = bool(_PRO_RE.search(t))                     # 'Pro' = staff group
     vm = VISA_RE.search(t)
-    if vm:
-        visa = vm.group(0).upper()
-        # applicant = everything before visa
-        applicant = t[:vm.start()].strip()
-        return {"kind": "kh", "applicant": applicant, "visa": visa, "raw_title": t}
-
-    return None
+    if not vm:
+        return None                                      # không có visa → không pair được
+    visa = _canon_visa(vm.group(0))
+    # Bỏ visa + prefix marker + KH token → còn lại là tên (có thể nhiều segment).
+    working = t[:vm.start()] + " " + t[vm.end():]
+    working = _PREFIX_MARKER_RE.sub(' ', working)
+    working = _KH_MARKER_RE.sub(' ', working)
+    working = re.sub(r'\s+', ' ', working).strip(' -')
+    # Split theo '-'; chọn segment chứa năm sinh; nếu không có thì segment dài nhất.
+    segs = [s.strip(' -') for s in re.split(r'\s*-\s*', working) if s.strip(' -')]
+    applicant = ""
+    for seg in segs:
+        if _YEAR_RE.search(seg):
+            applicant = seg
+            break
+    if not applicant and segs:
+        applicant = max(segs, key=len)
+    return {
+        "kind": "pro" if is_pro else "kh",
+        "applicant": applicant,                          # có thể "" — sheet để trống ô tên
+        "visa": visa,
+        "raw_title": title,
+    }
 
 def make_pair_key(applicant: str, visa: str) -> str:
     """Normalize for matching KH↔Pro."""
@@ -1166,6 +1200,46 @@ async def on_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+def _self_test_parse_titles() -> None:
+    """Khoá behaviour của parse_group_title qua 6 ví dụ thực tế + 2 regression + edge cases."""
+    # 6 ví dụ thực tế anh đưa
+    r1 = parse_group_title("DH Pro WP2Y - Trần Đăng Sự 2006")
+    assert r1 and r1["kind"] == "pro" and r1["applicant"] == "Trần Đăng Sự 2006" and r1["visa"] == "WP2Y", r1
+    r2 = parse_group_title("DongHanh WP2Y - KH Trần Đăng Sự 2006")
+    assert r2 and r2["kind"] == "kh" and r2["applicant"] == "Trần Đăng Sự 2006" and r2["visa"] == "WP2Y", r2
+    r3 = parse_group_title("DH Pro HighSkilled - Lê Văn Hậu 1991")
+    assert r3 and r3["kind"] == "pro" and r3["applicant"] == "Lê Văn Hậu 1991" and r3["visa"] == "HighSkilled", r3
+    r4 = parse_group_title("DongHanh HighSkilled - KH Lê Văn Hậu 1991")
+    assert r4 and r4["kind"] == "kh" and r4["applicant"] == "Lê Văn Hậu 1991" and r4["visa"] == "HighSkilled", r4
+    r5 = parse_group_title("Nguyễn Trường An 2006 WP10m - A Hồng")
+    assert r5 and r5["kind"] == "kh" and r5["applicant"] == "Nguyễn Trường An 2006" and r5["visa"] == "WP10M", r5
+    r6 = parse_group_title("DH Pro WP10m – Nguyễn Trường An 2006")  # em-dash
+    assert r6 and r6["kind"] == "pro" and r6["applicant"] == "Nguyễn Trường An 2006" and r6["visa"] == "WP10M", r6
+    # 2 format gốc — regression
+    rA = parse_group_title("Hoàng Thị Mơ TEST7 1991 WP10m - C Liên")
+    assert rA and rA["kind"] == "kh" and rA["applicant"] == "Hoàng Thị Mơ TEST7 1991", rA
+    rB = parse_group_title("DH Pro WP10m - Hoàng Thị Mơ TEST7 1991")
+    assert rB and rB["kind"] == "pro" and rB["applicant"] == "Hoàng Thị Mơ TEST7 1991", rB
+    # Edge cases
+    assert parse_group_title("") is None
+    assert parse_group_title("   ") is None
+    assert parse_group_title("Random text no visa") is None
+    # Tên thiếu năm sinh — vẫn detect, applicant = segment dài nhất
+    rC = parse_group_title("DH Pro WP10m - Trần Đăng Sự")
+    assert rC and rC["kind"] == "pro" and rC["applicant"] == "Trần Đăng Sự" and rC["visa"] == "WP10M", rC
+    # Tên thiếu hẳn — vẫn detect, applicant=""
+    rD = parse_group_title("DH Pro WP10m -")
+    assert rD and rD["kind"] == "pro" and rD["applicant"] == "" and rD["visa"] == "WP10M", rD
+    # pair_key 2 chiều cho ví dụ 2 vs 1, 4 vs 3
+    assert make_pair_key(r2["applicant"], r2["visa"]) == make_pair_key(r1["applicant"], r1["visa"])
+    assert make_pair_key(r4["applicant"], r4["visa"]) == make_pair_key(r3["applicant"], r3["visa"])
+    # _canon_visa các nhánh chính
+    assert _canon_visa("wp10m") == "WP10M"
+    assert _canon_visa("High Skilled") == "HighSkilled"
+    assert _canon_visa("highskilled") == "HighSkilled"
+    assert _canon_visa("farm") == "FARM"
+
+
 def main():
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(16).build()
     app.add_handler(ChatMemberHandler(on_bot_join, ChatMemberHandler.MY_CHAT_MEMBER))
@@ -1178,4 +1252,8 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        _self_test_parse_titles()
+        print("OK")
+        sys.exit(0)
     main()

@@ -9,7 +9,11 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   customer (KH) groups → debounces a batch → spawns `scan_pipeline.py` as a subprocess → posts a summary
   + a short AI-checklist confirmation to the Pro group. Also handles staff Q&A (@mention / reply / DM) via
   `lib/chat.py`, and on-demand `/check` re-runs the thẩm định. Telegram messages use `parse_mode=HTML`
-  (`send_html()` helper); the HTML is built by our code (`html.escape`), never by the LLM.
+  (`send_html()` helper); the HTML is built by our code (`html.escape`), never by the LLM. **Group-title
+  parser** (`parse_group_title()`): phân biệt KH vs Pro bằng chữ `Pro` (case-insensitive); hỗ trợ nhiều
+  prefix (`DH Pro` / `DongHanh` / `Đồng Hành Pro` / `Đồng Hành`), em-dash / en-dash, token `KH` trên nhánh
+  khách; chương trình gồm `WP\d+[mMyY]?` + `HighSkilled` + `FARM` + các code visa truyền thống. Self-test:
+  `python3 telegram_listener.py --self-test`.
 - **`scan_pipeline.py`** — the unzip → Gemini-OCR → classify → SOP-rename → upload-to-Drive → AI-thẩm-định
   pipeline. Gemini-OCR runs **in parallel** across files (`SCAN_OCR_WORKERS` threads, default 5); classify /
   rename / Drive-upload / thẩm-định stay sequential. Manifest covers every input file; per-file retries; idempotent re-runs. Run by the bot
@@ -50,6 +54,7 @@ chat model ids. Both `telegram_listener.py` and `scan_pipeline.py` load it from 
 ## Develop
 ```bash
 python3 -m py_compile telegram_listener.py scan_pipeline.py lib/*.py     # syntax check
+python3 telegram_listener.py --self-test                                 # group-title parser self-test
 python3 scan_pipeline.py --self-test                                     # SOP-naming self-test
 python3 lib/checklist.py && python3 lib/chat.py                           # the "tests" — each prints OK
 python3 scan_pipeline.py <some.zip> --dry-run --applicant Test --manifest /tmp/m.json   # no Drive writes
