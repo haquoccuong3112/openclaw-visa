@@ -1,0 +1,77 @@
+# ============================================================================
+# Golden test case — Mức 1 vision flags (inline OCR)
+# ============================================================================
+# Test 5 vision flag mới cho Anh thẻ (8.2 a-e) + 1 flag cho CCCD (4.3).
+# Cố tình có 4 file Anh thẻ + 1 CCCD với vision flags BẤT THƯỜNG → expected fire.
+# Plus 1 Anh thẻ sạch để verify rule KHÔNG fire sai.
+# ============================================================================
+
+applicant: "Nguyễn Văn B (vision test)"
+today: "13/05/2026"
+
+dataset:
+  # Ảnh thẻ #1: trang điểm + đeo trang sức → fire 8.2a + 8.2b
+  - ten: "Anh the-Nguyen Van B.jpg"
+    loai: "Anh the"
+    du_lieu:
+      la_anh_the: true
+      la_mat_moc: false         # ← 8.2a (có trang điểm)
+      co_trang_suc: true        # ← 8.2b (có bông tai)
+      co_xam_lo: false
+      toc_toi_mau: true
+      phong_nen_trang: true
+
+  # Ảnh thẻ #2: lộ xăm + tóc nhuộm sáng → fire 8.2c + 8.2d
+  - ten: "Anh the 2-Nguyen Van B.jpg"
+    loai: "Anh the"
+    du_lieu:
+      la_anh_the: true
+      la_mat_moc: true
+      co_trang_suc: false
+      co_xam_lo: true           # ← 8.2c (xăm lộ)
+      toc_toi_mau: false        # ← 8.2d (nhuộm sáng)
+      phong_nen_trang: true
+
+  # Ảnh thẻ #3: phông nền không trắng → fire 8.2e
+  - ten: "Anh the 3-Nguyen Van B.jpg"
+    loai: "Anh the"
+    du_lieu:
+      la_anh_the: true
+      la_mat_moc: true
+      co_trang_suc: false
+      co_xam_lo: false
+      toc_toi_mau: true
+      phong_nen_trang: false    # ← 8.2e (phông không trắng)
+
+  # CCCD mặt sau thiếu vân tay → fire 4.3
+  - ten: "CCCD-Nguyen Van B mat sau.pdf"
+    loai: "CCCD"
+    du_lieu:
+      ho_ten: "Nguyễn Văn B"
+      so_giay_to: "012345678901"
+      co_2_o_van_tay: false     # ← 4.3 (thiếu vân tay)
+
+  # Ảnh thẻ sạch → KHÔNG fire rule nào
+  - ten: "Anh the-Nguyen Van B (clean).jpg"
+    loai: "Anh the"
+    du_lieu:
+      la_anh_the: true
+      la_mat_moc: true
+      co_trang_suc: false
+      co_xam_lo: false
+      toc_toi_mau: true
+      phong_nen_trang: true
+
+# Expected: 5 rule mới fire (vision flags)
+# Note: 8.2a-e fire trên 5 ảnh thẻ — mỗi rule có thể fire nhiều lần (đếm uniqueness theo code)
+expected_errors:
+  - "8.2a"      # mặt mộc false (ảnh #1)
+  - "8.2b"      # trang sức true (ảnh #1)
+  - "8.2c"      # xăm lộ true (ảnh #2)
+  - "8.2d"      # tóc sáng (ảnh #2)
+  - "8.2e"      # phông không trắng (ảnh #3)
+  - "4.3"       # thiếu vân tay CCCD
+
+forbidden_errors:
+  - "8.3"       # ảnh thẻ trùng — không có signal trong test này
+  - "1.2"       # phẫu thuật — không có vision_compare trong test này

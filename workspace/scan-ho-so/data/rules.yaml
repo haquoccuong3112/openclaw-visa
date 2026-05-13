@@ -188,10 +188,10 @@ validations:
 
   - code: "1.2"
     category: ho_tich
-    severity: warn
+    severity: reject
     applies_to: [Passport]
     rule: "Đối chiếu ảnh trên hộ chiếu với ảnh thẻ — phát hiện dấu hiệu phẫu thuật thẩm mỹ"
-    action: "BÁO người phụ trách nếu nghi ngờ"
+    action: "BÁO người phụ trách (Mức 3 vision: dùng `_vision_compare.phau_thuat_signs` ground-truth)"
     condition: null
     needs_llm: true
 
@@ -321,8 +321,9 @@ validations:
     applies_to: [CCCD]
     rule: "Mặt sau CCCD có đủ 2 ô dấu vân tay (ngón trỏ trái + phải)"
     action: "BÁO nếu thiếu hoặc khách bị cụt ngón tay"
-    condition: null
-    needs_llm: true
+    # Vision flag từ Gemini OCR (Mức 1) — false ⇒ thiếu/cụt vân tay
+    condition: "doc.extracted.co_2_o_van_tay == false"
+    needs_llm: false
 
   # === CT07 ===
   - code: "5.1"
@@ -394,17 +395,63 @@ validations:
     category: ho_tich
     severity: warn
     applies_to: [Anh the]
-    rule: "Tiêu chuẩn ảnh: mặt mộc, không trang sức, áo thun giản dị, tóc tối màu, che xăm, phông trắng"
+    rule: "Tiêu chuẩn ảnh thẻ tổng quát: mặt mộc, không trang sức, áo thun giản dị, tóc tối màu, che xăm, phông trắng"
     action: "Đánh dấu 'Cần kiểm tra' kèm tiêu chí không đạt"
     condition: null
     needs_llm: true
+
+  # Vision flags từ Mức 1 — Gemini OCR check trực tiếp trên ảnh, deterministic
+  - code: "8.2a"
+    category: ho_tich
+    severity: warn
+    applies_to: [Anh the]
+    rule: "Ảnh thẻ: KH phải mặt mộc (không son phấn, không kẻ mắt đậm)"
+    action: "Yêu cầu chụp lại không trang điểm"
+    condition: "doc.extracted.la_mat_moc == false"
+    needs_llm: false
+
+  - code: "8.2b"
+    category: ho_tich
+    severity: warn
+    applies_to: [Anh the]
+    rule: "Ảnh thẻ: KHÔNG đeo trang sức (bông tai, dây chuyền, vòng tay, kính thời trang)"
+    action: "Yêu cầu tháo trang sức và chụp lại"
+    condition: "doc.extracted.co_trang_suc == true"
+    needs_llm: false
+
+  - code: "8.2c"
+    category: ho_tich
+    severity: warn
+    applies_to: [Anh the]
+    rule: "Ảnh thẻ: KHÔNG được lộ hình xăm"
+    action: "Yêu cầu che kín hình xăm và chụp lại"
+    condition: "doc.extracted.co_xam_lo == true"
+    needs_llm: false
+
+  - code: "8.2d"
+    category: ho_tich
+    severity: warn
+    applies_to: [Anh the]
+    rule: "Ảnh thẻ: Tóc phải tối màu tự nhiên (đen/nâu sậm) — không nhuộm sáng / màu lạ"
+    action: "Yêu cầu nhuộm lại tóc tối màu rồi chụp lại"
+    condition: "doc.extracted.toc_toi_mau == false"
+    needs_llm: false
+
+  - code: "8.2e"
+    category: ho_tich
+    severity: warn
+    applies_to: [Anh the]
+    rule: "Ảnh thẻ: Phông nền phải trắng / xanh đơn sắc, đủ sáng — không phức tạp/lộn xộn"
+    action: "Yêu cầu chụp lại với phông trắng"
+    condition: "doc.extracted.phong_nen_trang == false"
+    needs_llm: false
 
   - code: "8.3"
     category: ho_tich
     severity: warn
     applies_to: [Anh the]
     rule: "Ảnh thẻ KHÔNG trùng ảnh trong HC/bằng lái nếu HC/bằng lái > 6 tháng"
-    action: "Yêu cầu ảnh mới"
+    action: "Yêu cầu ảnh mới (Mức 3 vision: dùng `_vision_compare` để check same_person + age_diff_months)"
     condition: null
     needs_llm: true
 

@@ -388,6 +388,17 @@ giấy tờ, dạng:
 
 5. **Địa giới hành chính sau 12/06/2025 (tỉnh) / 01/07/2025 (xã/phường)**: đối chiếu `_dia_gioi` / danh sách 34 đơn vị mới.
 
+6. **VISION COMPARE (Mức 3)**: phần `_vision_compare` (nếu có) là kết quả gemini-2.5-pro SO SÁNH ảnh chân
+   dung trên ảnh thẻ với ảnh trên hộ chiếu / GPLX / CCCD — COI LÀ GROUND-TRUTH, KHÔNG tự dò lại.
+   - `same_person`=false (confidence=high) → **🔴 LỖI NGHIÊM TRỌNG**: 2 ảnh KHÁC NGƯỜI → ghi rule code `[8.3+]`
+     vào PHẦN 3, đề xuất kiểm tra hồ sơ khẩn cấp.
+   - `phau_thuat_signs` non-empty → **🔴 [1.2]**: nghi phẫu thuật thẩm mỹ — báo người phụ trách kèm danh sách
+     bộ phận nghi vấn (lấy từ field).
+   - `same_person`=true AND `age_diff_months` > 6 → **🟡 [8.3]**: ảnh thẻ trùng ảnh trên giấy khác cách quá
+     6 tháng → yêu cầu ảnh thẻ mới hơn.
+   - `anomalies` non-empty → ghi vào PHẦN 3 với mức độ phù hợp.
+   - `confidence`=low → đề xuất "cần đối chiếu thủ công bản gốc", KHÔNG báo lỗi cứng.
+
 # THAM KHẢO — ĐIỂM DANH HỒ SƠ THEO CHECKLIST FARM (ALLY)
 (đếm tự động từ dữ liệu OCR, coi là CHUẨN — KHÔNG được mâu thuẫn; trạng thái mỗi mục: "✅ đã có" /
 "❌ THIẾU" / "— không áp dụng" / "— chưa có (tùy chọn)" / "— sẽ làm sau"):
@@ -863,9 +874,14 @@ def build_dia_gioi(dataset: list, profile) -> dict | None:
 # ===========================================================================
 def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
                   batch_items: list | None = None, today: str | None = None,
-                  model: str | None = None) -> dict:
+                  model: str | None = None,
+                  vision_compare: list | None = None) -> dict:
     """Chạy toàn bộ bước thẩm định cho một case (2 tầng: trích xuất rẻ → reasoning);
-    trả về dict để gắn vào manifest['checklist']."""
+    trả về dict để gắn vào manifest['checklist'].
+
+    `vision_compare` (Mức 3 vision): list[{file_a, file_b, result}] từ
+    lib/vision_check.evaluate_pairs() — inject vào eval_input như `_dia_gioi`.
+    """
     try:
         from .sop_naming import title_case_ascii
     except Exception:
@@ -891,6 +907,16 @@ def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
         eval_input = prof
         extract_model = CHECKLIST_EXTRACT_MODEL
         profile_out = prof
+
+    # --- Vision compare (Mức 3): gắn _vision_compare làm ground-truth cho LLM ---
+    if vision_compare:
+        try:
+            if isinstance(eval_input, dict):
+                eval_input["_vision_compare"] = vision_compare
+            else:
+                eval_input = list(eval_input) + [{"_vision_compare": vision_compare}]
+        except Exception as e:  # noqa: BLE001
+            print(f"checklist: gắn _vision_compare lỗi: {type(e).__name__}: {e}", flush=True)
 
     # --- Địa giới hành chính: tra cứu deterministic (cũ↔mới, tới cấp xã) → gắn vào hồ sơ làm ground-truth ---
     try:

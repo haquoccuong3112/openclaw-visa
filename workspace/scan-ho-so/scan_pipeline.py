@@ -224,7 +224,17 @@ Các trường:
   ky_sao_ke_tu, ky_sao_ke_den, ten_cong_ty, ma_so_bhxh, giai_doan_dong_bhxh, ma_the_bhyt, bhyt_gia_tri_tu, bhyt_gia_tri_den,
   tinh_trang_an_tich, la_to_khai (true nếu là tờ tự khai / biểu mẫu khách tự ghi; false nếu là giấy tờ chính thức do cơ quan cấp),
   la_anh_the (true CHỈ khi cả file LÀ một tấm ảnh chân dung riêng lẻ kiểu ảnh dán hồ sơ — KHÔNG phải ảnh sinh hoạt / làm việc / làm nông / chụp nhóm, và KHÔNG phải ảnh chân dung in trên CCCD / hộ chiếu / bằng cấp),
-  co_dau_moc (true/false), co_chu_ky (true/false), visual_flags (["ảnh mờ","nghi tẩy xóa ...","thiếu chữ ký","thiếu dấu mộc",...])
+  co_dau_moc (true/false), co_chu_ky (true/false), visual_flags (["ảnh mờ","nghi tẩy xóa ...","thiếu chữ ký","thiếu dấu mộc",...]),
+
+  // Chỉ điền khi doc_type = "Ảnh thẻ" (file CẢ là 1 tấm ảnh chân dung độc lập):
+  la_mat_moc (true nếu mặt mộc — không son phấn, không kẻ mắt đậm; false nếu có trang điểm rõ),
+  co_trang_suc (true nếu có trang sức như bông tai, dây chuyền, vòng tay, kính thời trang; false nếu không),
+  co_xam_lo (true nếu thấy hình xăm lộ ra trong khung ảnh — cổ, vai, ngực, tay nếu thấy),
+  toc_toi_mau (true nếu tóc màu tối tự nhiên: đen/nâu sậm; false nếu nhuộm sáng/highlight/màu lạ),
+  phong_nen_trang (true nếu phông nền trắng/xanh đơn sắc, đủ sáng; false nếu phông phức tạp/lộn xộn/tối),
+
+  // Chỉ điền khi doc_type = "Căn cước công dân" và FILE LÀ MẶT SAU CCCD:
+  co_2_o_van_tay (true nếu mặt sau có ĐỦ 2 ô dấu vân tay rõ — ngón trỏ trái + ngón trỏ phải; false nếu thiếu 1/2 ô, mờ, hoặc trống)
 
 VÍ DỤ output (3 case tham khảo — JSON output thực tế phải khớp file thực):
 
@@ -963,13 +973,38 @@ def main(argv=None) -> int:
         # --- AI checklist cross-check: a bolt-on after OCR/upload; it must NEVER
         #     break the core result, so the whole thing is wrapped. Runs when there's
         #     a checklist-relevant doc in the batch (auto-debounce), or always in --checklist-only.
+        # === Mức 3 — Vision compare (Anh thẻ × Passport/GPLX/CCCD) ===
+        # Chỉ chạy khi batch có ít nhất 1 Anh thẻ + 1 doc có ảnh chân dung.
+        vision_results: list[dict] = []
+        if not args.dry_run and case_folder_id and not args.no_checklist:
+            try:
+                from lib import vision_check as _vc
+                # Map src_name → local path (files đã ở workdir trước cleanup)
+                src_to_path = {src_name: str(p) for (p, src_name) in files}
+                items_with_paths = []
+                for it in items:
+                    src = it.get("src_name") or ""
+                    lp = src_to_path.get(src)
+                    if lp and Path(lp).exists():
+                        items_with_paths.append({**it, "local_path": lp})
+                pairs = _vc.find_compare_pairs(items_with_paths)
+                if pairs:
+                    log(f"vision_compare: chạy {len(pairs)} cặp Anh thẻ × giấy có ảnh")
+                    vision_results = _vc.evaluate_pairs(pairs)
+                    if vision_results:
+                        log(f"vision_compare: xong {len(vision_results)}/{len(pairs)} cặp")
+                        manifest["vision_compare"] = vision_results
+            except Exception as e:  # noqa: BLE001
+                log(f"vision_compare lỗi (bỏ qua): {type(e).__name__}: {e}")
+
         if not args.dry_run and case_folder_id and not args.no_checklist:
             try:
                 from lib import checklist as _ck
                 if args.checklist_only or _ck.should_run_checklist(manifest):
                     log("running AI checklist ...")
                     ck = _ck.run_and_write(case_folder_id, applicant, SHARED_DRIVE_ID,
-                                           batch_items=items, today=today_vn)
+                                           batch_items=items, today=today_vn,
+                                           vision_compare=vision_results or None)
                     manifest["checklist"] = ck
                     cov = ck.get("coverage") or {}
                     log(f"checklist: ran={ck.get('ran')} model={ck.get('model')} "
