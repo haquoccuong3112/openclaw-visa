@@ -908,7 +908,23 @@ def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
         extract_model = CHECKLIST_EXTRACT_MODEL
         profile_out = prof
 
-    # --- Vision compare (Mức 3): gắn _vision_compare làm ground-truth cho LLM ---
+    # --- Vision compare (Mức 3): case-level từ Drive (auto-trigger nếu caller chưa pass) ---
+    # Logic:
+    #   • Nếu caller (scan_pipeline.py /oldfile) đã chạy vision với local files → dùng kết quả đó.
+    #   • Nếu không (vd /check, hoặc batch chỉ có Anh thẻ mà Passport ở Drive cũ) → tự download
+    #     từ Drive + run + cache sidecar `_vision_compare.json` trong _Bot OCR & Metadata.
+    if not vision_compare:
+        try:
+            try:
+                from .vision_check import compare_pairs_for_case
+            except ImportError:
+                from vision_check import compare_pairs_for_case  # type: ignore  # noqa
+            vision_compare = compare_pairs_for_case(case_folder_id, dataset, drive_id=drive_id)
+            if vision_compare:
+                print(f"checklist: vision_compare case-level chạy ({len(vision_compare)} pairs, "
+                      f"{sum(1 for v in vision_compare if not v.get('cached'))} mới)", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"checklist: vision_compare case-level lỗi: {type(e).__name__}: {e}", flush=True)
     if vision_compare:
         try:
             if isinstance(eval_input, dict):

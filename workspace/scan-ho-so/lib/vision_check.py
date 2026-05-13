@@ -25,6 +25,7 @@ import io
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 
 import httpx
@@ -222,6 +223,151 @@ def evaluate_pairs(pairs: list[tuple[dict, dict]],
             "result": result,
             "cached": cached,
         })
+    return out
+
+
+_FILE_ID_RE = re.compile(r"/d/([A-Za-z0-9_-]{20,})")
+
+
+def _file_id_from_link(drive_link: str) -> str:
+    if not drive_link:
+        return ""
+    m = _FILE_ID_RE.search(drive_link)
+    return m.group(1) if m else ""
+
+
+def compare_pairs_for_case(case_folder_id: str, dataset: list[dict],
+                            drive_id: str | None = None) -> list[dict]:
+    """Case-level vision compare — download files từ Drive cho mọi cặp (Anh thẻ × portrait doc).
+    Cache result trong sidecar `_vision_compare.json` ở `_Bot OCR & Metadata` để /check re-run
+    không tốn token. Trả list[{file_a, file_b, result}].
+
+    Khi nào dùng:
+      - scan_pipeline.py sau process_one (batch mode): item.local_path đã sẵn → có thể truyền
+        trực tiếp evaluate_pairs(), HOẶC gọi function này để bot dùng cache nếu đã có.
+      - checklist.py run_and_write (/check mode): không có local_path → bắt buộc dùng function này.
+    """
+    try:
+        try:
+            from .drive_helpers import (
+                get_or_create_folder, find_file_by_name, download_file_bytes, upload_file,
+            )
+        except ImportError:
+            from drive_helpers import (  # type: ignore  # noqa
+                get_or_create_folder, find_file_by_name, download_file_bytes, upload_file,
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"vision_check: drive_helpers import lỗi: {e}", flush=True)
+        return []
+
+    # 1) Skip nếu không có Anh thẻ
+    has_anh_the = any((d.get("loai") or d.get("tag")) == "Anh the" for d in dataset)
+    has_portrait = any((d.get("loai") or d.get("tag")) in DOCS_WITH_PORTRAIT for d in dataset)
+    if not (has_anh_the and has_portrait):
+        return []
+
+    # 2) Đọc sidecar cache cũ nếu có
+    META_FOLDER = "_Bot OCR & Metadata"
+    SIDECAR_NAME = "_vision_compare.json"
+    cached: list[dict] = []
+    cache_index: dict[str, dict] = {}   # pair_hash → result
+    try:
+        meta_id = get_or_create_folder(META_FOLDER, case_folder_id, drive_id=drive_id)
+        existing_id = find_file_by_name(SIDECAR_NAME, meta_id, drive_id=drive_id,
+                                         mime_type="application/json")
+        if existing_id:
+            cached_text = download_file_bytes(existing_id, drive_id=drive_id).decode("utf-8")
+            cached = json.loads(cached_text)
+            if isinstance(cached, list):
+                for item in cached:
+                    if isinstance(item, dict) and item.get("pair_hash"):
+                        cache_index[item["pair_hash"]] = item
+    except Exception as e:  # noqa: BLE001
+        print(f"vision_check: cache read lỗi (ignored): {type(e).__name__}: {e}", flush=True)
+
+    # 3) Xây danh sách pair (max MAX_PAIRS_PER_CASE)
+    anh_the_items = [d for d in dataset if (d.get("loai") or d.get("tag")) == "Anh the"]
+    portrait_items = [d for d in dataset if (d.get("loai") or d.get("tag")) in DOCS_WITH_PORTRAIT]
+    if not anh_the_items or not portrait_items:
+        return []
+    main_anh_the = anh_the_items[0]
+    priority = {"Passport": 0, "GPLX": 1, "CCCD": 2}
+    portrait_items.sort(key=lambda d: priority.get(d.get("loai") or d.get("tag"), 99))
+
+    out: list[dict] = []
+    n_calls = 0
+    for doc in portrait_items[:MAX_PAIRS_PER_CASE]:
+        a_link = main_anh_the.get("drive_link", "")
+        b_link = doc.get("drive_link", "")
+        a_fid = _file_id_from_link(a_link)
+        b_fid = _file_id_from_link(b_link)
+        if not a_fid or not b_fid:
+            continue
+        # Pair hash dựa trên FILE_ID (rẻ — không cần download nếu cache hit)
+        ph = hashlib.sha1(f"{a_fid}::{b_fid}".encode()).hexdigest()
+        if ph in cache_index:
+            out.append({**cache_index[ph], "cached": True})
+            continue
+        # Cache miss → download + compare
+        try:
+            a_bytes = download_file_bytes(a_fid, drive_id=drive_id)
+            b_bytes = download_file_bytes(b_fid, drive_id=drive_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"vision_check: download pair lỗi: {type(e).__name__}: {e}", flush=True)
+            continue
+        # Write to temp files for compare_portraits
+        try:
+            import tempfile
+            a_ten = main_anh_the.get("ten") or "anh_the.jpg"
+            b_ten = doc.get("ten") or "doc.pdf"
+            with tempfile.NamedTemporaryFile(suffix="-" + Path(a_ten).suffix, delete=False) as af:
+                af.write(a_bytes); a_path = af.name
+            with tempfile.NamedTemporaryFile(suffix="-" + Path(b_ten).suffix, delete=False) as bf:
+                bf.write(b_bytes); b_path = bf.name
+            result = compare_portraits(Path(a_path), Path(b_path),
+                                        doc_type=doc.get("loai") or doc.get("tag") or "?")
+            try:
+                os.unlink(a_path); os.unlink(b_path)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as e:  # noqa: BLE001
+            print(f"vision_check: compare lỗi: {type(e).__name__}: {e}", flush=True)
+            continue
+        if result is None:
+            continue
+        n_calls += 1
+        out.append({
+            "file_a": main_anh_the.get("ten") or "?",
+            "file_a_tag": "Anh the",
+            "file_b": doc.get("ten") or "?",
+            "file_b_tag": doc.get("loai") or doc.get("tag"),
+            "pair_hash": ph,
+            "result": result,
+            "cached": False,
+        })
+
+    # 4) Persist updated cache (giữ entry cũ + thêm mới)
+    if out and n_calls > 0:
+        try:
+            merged = list(cache_index.values())
+            new_hashes = {x["pair_hash"] for x in out if x.get("pair_hash")}
+            merged = [m for m in merged if m.get("pair_hash") not in new_hashes]
+            merged.extend([x for x in out if x.get("pair_hash") and not x.get("cached")])
+            import tempfile
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                              encoding="utf-8") as fh:
+                json.dump(merged, fh, ensure_ascii=False, indent=2)
+                cache_path = fh.name
+            upload_file(cache_path, SIDECAR_NAME, meta_id, drive_id=drive_id,
+                        mime="application/json")
+            try:
+                os.unlink(cache_path)
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"vision_check: cache saved ({len(merged)} pairs total, {n_calls} new)", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"vision_check: cache save lỗi (ignored): {type(e).__name__}: {e}", flush=True)
+
     return out
 
 
