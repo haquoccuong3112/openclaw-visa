@@ -406,9 +406,10 @@ PHONG CÁCH BẮT BUỘC:
   theo hướng đó (kể cả câu nói tắt / mơ hồ / kèm yêu cầu phụ như "gửi link", "in ra", "tôi check lại"…).
   CHỈ từ chối khi câu hỏi RÕ RÀNG ngoài lề (thời tiết, tin tức chung, chuyện cá nhân không dính hồ sơ);
   lúc đó mới trả lời 1 câu rằng bạn chỉ hỗ trợ về hồ sơ này.
-- LINK: KHÔNG tự dán URL Drive. Khi nhân viên muốn mở / xem / "check lại" một (hoặc vài) giấy tờ cụ thể →
-  chỉ cần NHẮC ĐÚNG TÊN FILE của giấy tờ đó (vd: "Xem lại LLTP-Hoang Thi Mo") — hệ thống tự gắn link
-  clickable vào đúng tên file đó. Khi nhân viên muốn mở CẢ hồ sơ → nhắc tới "thư mục hồ sơ"
+- LINK: KHÔNG tự dán URL Drive. Khi nhân viên muốn mở / xem / "check lại" / DẪN LINK / GỬI LINK / URL /
+  đường dẫn của một (hoặc vài) giấy tờ cụ thể → chỉ cần NHẮC ĐÚNG TÊN FILE của giấy tờ đó Y NGUYÊN
+  như trong DỮ LIỆU (trường `ten`), MỖI tên file 1 dòng, KHÔNG kèm chú thích/giải thích/URL. Hệ thống tự
+  gắn link clickable vào đúng tên file đó. Khi nhân viên muốn mở CẢ hồ sơ → nhắc tới "thư mục hồ sơ"
   (link thư mục Drive của hồ sơ này: {{DRIVE_LINK}}).
 - Mọi mốc thời gian / hạn → tính theo HÔM NAY = {{TODAY}} (dd/mm/yyyy).
 
@@ -668,6 +669,41 @@ def _coverage_block(cov: dict) -> str:
     return s
 
 
+# ===========================================================================
+# "Dẫn / gửi link" intent — bypass LLM khi staff xin link của 1+ file cụ thể.
+# Trả thẳng danh sách tên file (1/dòng) → linkify_answer sẽ wrap thành <a>.
+# ===========================================================================
+_LINK_NOUN_RE = re.compile(r"\b(link|url|liên\s*kết|đường\s*dẫn)\b", re.IGNORECASE)
+_LINK_VERB_RE = re.compile(
+    r"\b(dẫn|gửi|gởi|cho|send|đưa|lấy|kiếm|tìm|tag|xem|mở|click)\b",
+    re.IGNORECASE,
+)
+
+
+def _try_link_intent(question: str, name_to_link: dict | None) -> str | None:
+    """Nếu câu hỏi là yêu cầu LINK + có nhắc ít nhất 1 filename khớp `name_to_link`
+    → trả danh sách tên file (1/dòng, ĐÚNG y nguyên trong sidecar). Trả None nếu
+    không khớp intent hoặc không có filename khớp (để LLM xử lý tiếp)."""
+    q = (question or "").strip()
+    if not q or not name_to_link:
+        return None
+    if not (_LINK_NOUN_RE.search(q) and _LINK_VERB_RE.search(q)):
+        return None
+    matched: list[str] = []
+    seen: set[str] = set()
+    for ten in sorted((t for t in name_to_link if t), key=len, reverse=True):
+        link = name_to_link.get(ten) or ""
+        if not link or ten in seen:
+            continue
+        stem = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", ten)
+        if ten in q or (stem and stem != ten and stem in q):
+            matched.append(ten)
+            seen.add(ten)
+    if not matched:
+        return None
+    return "\n".join(matched)
+
+
 async def answer_question(case_meta: dict, ctx: dict, history, question: str, drive_id,
                           model: str | None = None, session_key: str | None = None) -> str:
     from .checklist import _call_openrouter
@@ -711,6 +747,10 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
                 if is_negative(question):
                     return "Đã huỷ đổi tên."
                 # không phải ok/huỷ → bỏ pending, trả lời câu hỏi như bình thường
+        # ── Yêu cầu LINK của file cụ thể? → bypass LLM, linkify sẽ tự gắn <a> ──
+        _li = _try_link_intent(question, ctx.get("name_to_link") or {})
+        if _li:
+            return _li
         text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user()) or "").strip()
         # ── Yêu cầu đổi tên file? (xử lý trước NEED_FILE/NEED_WEB) ──
         wren = parse_need_rename(text)
@@ -883,12 +923,27 @@ if __name__ == "__main__":
     for fn in (build_case_context, get_case_context, invalidate_case_cache, answer_question, get_file_fulltext,
                web_search, cases_for_staff, _match_case, pick_case_for_dm, group_history, dm_session, check_cooldown, linkify_answer,
                _strip_markdown_plain, parse_need_rename, parse_need_addr, addr_lookup_text, is_affirmative, is_negative,
-               set_pending_rename, pop_pending_rename, _sanitize_new_name, do_rename):
+               set_pending_rename, pop_pending_rename, _sanitize_new_name, do_rename, _try_link_intent):
         assert callable(fn), fn
     _sys_lc = _OFFICER_SYSTEM.lower()
     assert "visa officer" in _sys_lc and "không nịnh" in _sys_lc and "need_file" in _sys_lc and "need_web" in _sys_lc
     assert "need_rename" in _sys_lc and "need_addr" in _sys_lc and "tên file" in _sys_lc and "{{DRIVE_LINK}}" in _OFFICER_SYSTEM
     assert "địa giới hành chính" in _sys_lc and "ground-truth" in _sys_lc and "doi_chieu" in _sys_lc  # mục địa-giới ground-truth
+    assert "dẫn link" in _sys_lc and "y nguyên" in _sys_lc  # rule LINK mới: yêu cầu LLM lặp tên file y nguyên
+    # _try_link_intent — bypass LLM khi staff xin link file cụ thể
+    _n2l = {"So dat-Tran Thong Tin.pdf": "https://drive.google.com/file/d/A/view",
+            "So dat-Tran Van Ly.pdf":    "https://drive.google.com/file/d/B/view",
+            "CCCD-Tran Van Huy.pdf":     "https://drive.google.com/file/d/C/view"}
+    _ans = _try_link_intent("hãy dẫn link\n- So dat-Tran Thong Tin.pdf\n- So dat-Tran Van Ly.pdf", _n2l)
+    assert _ans == "So dat-Tran Thong Tin.pdf\nSo dat-Tran Van Ly.pdf", _ans
+    assert _try_link_intent("gửi link So dat-Tran Van Ly", _n2l) == "So dat-Tran Van Ly.pdf"
+    assert _try_link_intent("cho mình URL của CCCD-Tran Van Huy.pdf", _n2l) == "CCCD-Tran Van Huy.pdf"
+    assert _try_link_intent("dẫn đường dẫn CCCD-Tran Van Huy.pdf", _n2l) == "CCCD-Tran Van Huy.pdf"
+    assert _try_link_intent("file này có link không?", _n2l) is None           # có noun, không có verb chỉ định
+    assert _try_link_intent("dẫn link giúp", _n2l) is None                     # có intent, không filename
+    assert _try_link_intent("mở giùm CCCD-Tran Van Huy.pdf", _n2l) is None     # không có noun link/url
+    assert _try_link_intent("", _n2l) is None
+    assert _try_link_intent("dẫn link CCCD-Tran Van Huy.pdf", {}) is None     # name_to_link rỗng
     s = (_OFFICER_SYSTEM.replace("{{TODAY}}", "12/05/2026")
          .replace("{{DRIVE_LINK}}", "https://drive.google.com/x").replace("{{DOC_LIST}}", "a.pdf, b.pdf"))
     assert "{{" not in s and "12/05/2026" in s and "a.pdf, b.pdf" in s and "drive.google.com/x" in s

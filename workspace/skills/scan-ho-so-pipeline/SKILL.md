@@ -212,6 +212,12 @@ không" (deterministic, tức thì, không tốn token, KHÔNG dùng `NEED_WEB` 
 `CHAT_WEB_MAX_RESULTS`=4, cached 60') — only for genuinely-external info that ISN'T administrative-boundary
 (new regulations/forms…); (4) `NEED_RENAME: <cũ> => <mới>` → đổi tên file (hỏi xác nhận trước). (None of
 these for off-topic chitchat.)
+**Yêu cầu LINK** ("dẫn link / gửi link / URL / đường dẫn / send link" + nhắc tên file): được xử lý
+**deterministic** trước khi gọi LLM bằng `_try_link_intent()` — match noun (`link|url|liên kết|đường dẫn`) +
+verb (`dẫn|gửi|cho|send|đưa|lấy|mở|xem…`) trong câu hỏi, đối chiếu tên file vs `name_to_link`, trả thẳng
+danh sách filenames (1/dòng, KHÔNG kèm chú thích) → `linkify_answer` wrap `<a href="drive_link">`. Không
+tốn token, không lệ thuộc LLM compliance. Trường hợp mơ hồ (câu chỉ có "dẫn link giúp" không nêu tên file)
+fall-through xuống LLM bình thường.
 Case context cached per case (TTL 10', invalidated after each scan / `/check`); per-user cooldown
 `CHAT_USER_COOLDOWN` (3s) + `CHAT_CONCURRENCY` (4) semaphore. **Threading**: only the OpenRouter calls run
 in `asyncio.to_thread` (their own `httpx.Client`); all Google-Drive calls run on the event loop directly

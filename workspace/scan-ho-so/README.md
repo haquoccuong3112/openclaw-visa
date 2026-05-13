@@ -29,7 +29,9 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
     (tra `diadia.py`) / `NEED_WEB` / `NEED_RENAME`; the case context also carries a `_dia_gioi` block (đã tra
     sẵn địa giới mọi địa chỉ trong hồ sơ → LLM coi là ground-truth, không gọi tên cũ↔mới của cùng nơi là "mâu
     thuẫn"); `linkify_answer()` (doc-name → clickable Telegram link); `do_rename()` (renames a Drive file + its
-    `.json`/`.md` sidecars).
+    `.json`/`.md` sidecars). Yêu cầu LINK/URL/đường dẫn cho file cụ thể đi qua helper deterministic
+    `_try_link_intent()` (bypass LLM, trả thẳng filenames để `linkify_answer` wrap `<a>`); `_OFFICER_SYSTEM`
+    cũng được dạy rằng "dẫn link / gửi link / URL" → lặp tên file Y NGUYÊN, mỗi tên 1 dòng.
   - `drive_helpers.py` — Google Drive API wrappers (folder cache; upload/list/find/delete/rename/replace).
     **All Drive calls run on the asyncio event loop, never in a thread** (the httplib2 client isn't thread-safe).
   - `google_clients.py` — Drive/Sheets API client init.
