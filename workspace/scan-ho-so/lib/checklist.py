@@ -51,38 +51,24 @@ MERGE_CUTOFF = date(2025, 6, 12)
 #       "tuy_chon"  → "nếu có / tăng hồ sơ" — hiện trong bảng, không cộng X/18
 #       "lam_sau"   → bổ sung/làm sau (xác nhận số dư, khám IOM) — hiện "— làm sau"
 # Tag tham chiếu phải khớp tag do lib.sop_naming sinh ra.
-REQUIRED_DOCS = [
-    # === 18 mục BẮT BUỘC (tính vào X/18) ===
-    ("1. Hộ chiếu đương đơn (gồm HC cũ nếu có)",                  "Passport",                        "bat_buoc"),
-    ("2. Giấy khai sinh đương đơn + vợ/chồng",                    "GKS",                             "bat_buoc"),
-    ("5. CCCD đương đơn + vợ/chồng/con",                          "CCCD",                            "bat_buoc"),
-    ("6. Giấy xác nhận cư trú CT07 (mới nhất)",                   "XNCT",                            "bat_buoc"),
-    ("7. Lý lịch tư pháp số 2 (≤6 tháng)",                        "LLTP",                            "bat_buoc"),
-    ("9. Ảnh thẻ 5x7 (phông trắng, có bản digital)",              "Anh the",                         "bat_buoc"),
-    ("10. Bằng cấp & chứng chỉ",                                  "Bang cap",                        "bat_buoc"),
-    ("11/12. Giấy tờ tài sản (sổ đỏ HOẶC HĐ cho/tặng-thừa kế)",   ("So dat", "HD cho-tang-thua ke"), "bat_buoc"),
-    ("13/14. Chứng minh nghề nông (sổ đỏ đất NN HOẶC ĐKKD HTX)",  ("So dat NN", "DKKD"),             "bat_buoc"),
-    ("15. Sổ tiết kiệm (≥300-400tr, kỳ hạn ≥6 tháng)",            "STK",                             "bat_buoc"),
-    ("17. Sao kê ngân hàng (3-6 tháng gần nhất)",                 "Sao ke",                          "bat_buoc"),
-    ("19a. Biên lai BHXH tự nguyện (3 tháng gần nhất)",           "BHXH",                            "bat_buoc"),
-    ("19b. Biên lai BHYT (3 tháng gần nhất)",                     "BHYT",                            "bat_buoc"),
-    ("21. Thông tin cá nhân & gia đình (sơ yếu lý lịch)",         "CV",                              "bat_buoc"),
-    ("22. Thẻ Visa/Mastercard quốc tế (ảnh 2 mặt)",              "The Visa-MC",                     "bat_buoc"),
-    ("23. Thông tin 2 đại lý nông sản/phân bón",                  "Dai ly NS",                       "bat_buoc"),
-    ("25. Ảnh chụp gia đình",                                     "Anh gia dinh",                    "bat_buoc"),
-    ("26. Ảnh & video làm nông",                                  "Anh-video lam nong",              "bat_buoc"),
-    # === ĐIỀU KIỆN ===
-    ("3. Giấy đăng ký kết hôn / giấy ly hôn",                     "GKH",                             "ket_hon"),
-    ("2b. Giấy khai sinh của con",                                "GKS_con",                         "co_con"),
-    ("4. Giấy xác nhận con đang học",                             "XN hoc",                          "co_con"),
-    # === NẾU CÓ / TĂNG HỒ SƠ ===
-    ("8. Bằng lái xe ô tô",                                       "GPLX",                            "tuy_chon"),
-    ("18. Cà vẹt xe / hoá đơn mua vàng",                          ("Ca vet xe", "Vang"),             "tuy_chon"),
-    ("24. Giấy công ích / bằng khen / thư cảm ơn",                "Bang khen",                       "tuy_chon"),
-    # === LÀM / BỔ SUNG SAU ===
-    ("16. Giấy xác nhận số dư sổ TK (EN/song ngữ)",               "XN so du",                        "lam_sau"),
-    ("20. Khám sức khỏe IOM",                                     "IOM",                             "lam_sau"),
-]
+# REQUIRED_DOCS được load TỪ data/rules.yaml (Phase 1 refactor data-driven).
+# Cấu trúc (giữ backward compat): list[(label, tags_str_or_tuple, severity)].
+def _build_required_docs() -> list[tuple[str, object, str]]:
+    # Robust import — work cả khi checklist.py chạy standalone (`python3 lib/checklist.py`)
+    # lẫn khi import như package (`from lib.checklist import …`).
+    try:
+        from .rule_loader import load_checklist
+    except ImportError:
+        from rule_loader import load_checklist  # type: ignore  # noqa
+    out: list[tuple[str, object, str]] = []
+    for ci in load_checklist():
+        num = ci.code.removeprefix("FARM-")
+        label = f"{num}. {ci.name}"
+        tags: object = ci.tags[0] if len(ci.tags) == 1 else tuple(ci.tags)
+        out.append((label, tags, ci.severity))
+    return out
+
+REQUIRED_DOCS = _build_required_docs()
 
 # Đợt gửi có ít nhất một file mang tag thuộc checklist → mới chạy thẩm định (tự debounce ở scan_zip.py).
 # Tính tự động từ REQUIRED_DOCS để không lệch nhau.

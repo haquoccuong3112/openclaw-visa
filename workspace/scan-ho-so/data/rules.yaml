@@ -1,0 +1,174 @@
+# ============================================================================
+# Bộ rule data-driven của bot @donghanhprocessingbot
+# ============================================================================
+# Cấu trúc 2 phần:
+#
+#   checklist:    26 mục FARM (ALLY) — KH phải có những giấy gì.
+#                 - severity: bat_buoc | ket_hon | co_con | tuy_chon | lam_sau
+#                 - Mục bat_buoc đếm vào "X/18 mục bắt buộc"
+#                 - Mục ket_hon chỉ áp dụng nếu KH đã kết hôn (suy từ GKH)
+#                 - Mục co_con chỉ áp dụng nếu KH có con (suy từ >=2 GKS hoặc có XN hoc)
+#
+#   validations:  56 rule v1.1 — KIỂM TRA TỪNG giấy tờ có hợp lệ không.
+#                 - severity: reject | warn | info
+#                   reject = giấy không dùng được, BÁO ngay (vd thế chấp)
+#                   warn   = cần làm rõ / sửa
+#                   info   = ghi nhận / nhắc nhở
+#                 - applies_to: list[tag] giấy tờ mà rule áp dụng
+#                 - condition: biểu thức Python-like trên `profile`
+#                   để bot tự check deterministic ngoài LLM (NULL = LLM phải kiểm)
+#                 - needs_llm: true ⇒ rule cần LLM reasoning (vd phẫu thuật thẩm mỹ,
+#                   khớp chữ ký, cross-validation giữa giấy tờ)
+#                 - code: "1.1" — đúng theo v1.1 doc hoặc "FARM-1" cho rule FARM
+#
+# Cách add rule mới: thêm entry vào danh sách thích hợp, lưu file, restart bot.
+# Schema: lib/rule_loader.py
+# ============================================================================
+
+schema_version: 1
+
+# ============================================================================
+# CHECKLIST FARM — 26 mục giấy tờ KH phải có (coverage check)
+# ============================================================================
+checklist:
+  # === I. HỒ TỊCH (BẮT BUỘC) ===
+  - code: "FARM-1"
+    name: "Hộ chiếu đương đơn (gồm HC cũ nếu có)"
+    tags: [Passport]
+    severity: bat_buoc
+
+  - code: "FARM-2"
+    name: "Giấy khai sinh đương đơn + vợ/chồng"
+    tags: [GKS]
+    severity: bat_buoc
+
+  - code: "FARM-5"
+    name: "CCCD đương đơn + vợ/chồng/con"
+    tags: [CCCD]
+    severity: bat_buoc
+
+  - code: "FARM-6"
+    name: "Giấy xác nhận cư trú CT07 (mới nhất)"
+    tags: [XNCT]
+    severity: bat_buoc
+
+  - code: "FARM-7"
+    name: "Lý lịch tư pháp số 2 (≤6 tháng)"
+    tags: [LLTP]
+    severity: bat_buoc
+
+  - code: "FARM-9"
+    name: "Ảnh thẻ 5x7 (phông trắng, có bản digital)"
+    tags: [Anh the]
+    severity: bat_buoc
+
+  - code: "FARM-10"
+    name: "Bằng cấp & chứng chỉ"
+    tags: [Bang cap]
+    severity: bat_buoc
+
+  # === II. TÀI SẢN (BẮT BUỘC) ===
+  - code: "FARM-11-12"
+    name: "Giấy tờ tài sản (sổ đỏ HOẶC HĐ cho/tặng-thừa kế)"
+    tags: [So dat, HD cho-tang-thua ke]
+    severity: bat_buoc
+
+  - code: "FARM-13-14"
+    name: "Chứng minh nghề nông (sổ đỏ đất NN HOẶC ĐKKD HTX)"
+    tags: [So dat NN, DKKD]
+    severity: bat_buoc
+
+  - code: "FARM-15"
+    name: "Sổ tiết kiệm (≥300-400tr, kỳ hạn ≥6 tháng)"
+    tags: [STK]
+    severity: bat_buoc
+
+  - code: "FARM-17"
+    name: "Sao kê ngân hàng (3-6 tháng gần nhất)"
+    tags: [Sao ke]
+    severity: bat_buoc
+
+  - code: "FARM-19a"
+    name: "Biên lai BHXH tự nguyện (3 tháng gần nhất)"
+    tags: [BHXH]
+    severity: bat_buoc
+
+  - code: "FARM-19b"
+    name: "Biên lai BHYT (3 tháng gần nhất)"
+    tags: [BHYT]
+    severity: bat_buoc
+
+  # === III. CÔNG VIỆC & THÔNG TIN (BẮT BUỘC) ===
+  - code: "FARM-21"
+    name: "Thông tin cá nhân & gia đình (sơ yếu lý lịch)"
+    tags: [CV]
+    severity: bat_buoc
+
+  - code: "FARM-22"
+    name: "Thẻ Visa/Mastercard quốc tế (ảnh 2 mặt)"
+    tags: [The Visa-MC]
+    severity: bat_buoc
+
+  - code: "FARM-23"
+    name: "Thông tin 2 đại lý nông sản/phân bón"
+    tags: [Dai ly NS]
+    severity: bat_buoc
+
+  - code: "FARM-25"
+    name: "Ảnh chụp gia đình"
+    tags: [Anh gia dinh]
+    severity: bat_buoc
+
+  - code: "FARM-26"
+    name: "Ảnh & video làm nông"
+    tags: [Anh-video lam nong]
+    severity: bat_buoc
+
+  # === ĐIỀU KIỆN ===
+  - code: "FARM-3"
+    name: "Giấy đăng ký kết hôn / giấy ly hôn"
+    tags: [GKH]
+    severity: ket_hon
+
+  - code: "FARM-2b"
+    name: "Giấy khai sinh của con"
+    tags: [GKS_con]   # special tag: >=2 GKS = đủ
+    severity: co_con
+
+  - code: "FARM-4"
+    name: "Giấy xác nhận con đang học"
+    tags: [XN hoc]
+    severity: co_con
+
+  # === NẾU CÓ / TĂNG HỒ SƠ ===
+  - code: "FARM-8"
+    name: "Bằng lái xe ô tô"
+    tags: [GPLX]
+    severity: tuy_chon
+
+  - code: "FARM-18"
+    name: "Cà vẹt xe / hoá đơn mua vàng"
+    tags: [Ca vet xe, Vang]
+    severity: tuy_chon
+
+  - code: "FARM-24"
+    name: "Giấy công ích / bằng khen / thư cảm ơn"
+    tags: [Bang khen]
+    severity: tuy_chon
+
+  # === LÀM / BỔ SUNG SAU ===
+  - code: "FARM-16"
+    name: "Giấy xác nhận số dư sổ TK (EN/song ngữ)"
+    tags: [XN so du]
+    severity: lam_sau
+
+  - code: "FARM-20"
+    name: "Khám sức khỏe IOM"
+    tags: [IOM]
+    severity: lam_sau
+
+# ============================================================================
+# VALIDATION RULES — Phase 2 sẽ migrate 30 rule v1.1 vào đây.
+# Tạm thời để trống; checklist (coverage) đã đủ để Phase 1 chạy.
+# ============================================================================
+validations: []
