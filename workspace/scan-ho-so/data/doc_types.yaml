@@ -1,0 +1,371 @@
+# ============================================================================
+# Doc Types — 32 loại giấy tờ bot phân loại (data-driven Phase 4).
+# ============================================================================
+# Mỗi entry:
+#   tag:         SOP tag (CCCD, So dat, Sao ke…) — DÙNG TRONG FILENAME
+#   folder:      Personal Docs | Education | Asset | Employment
+#   description: 1 câu giải thích loại giấy đó (LLM dùng để classify chính xác hơn)
+#   patterns:
+#     doc_type:  list regex match `raw_doc_type` từ Gemini OCR (đã strip diacritics + lower)
+#     filename:  list regex match tên file (đã strip diacritics + lower)
+#   in_checklist: list rule code FARM/v1.1 mà loại này thuộc về (cross-ref rules.yaml)
+#
+# Order matters: pattern ở entry sớm hơn được match trước → ĐẶT entry CHI TIẾT
+# (multi-token disambiguation) LÊN ĐẦU (vd "So dat NN" trước "So dat").
+# ============================================================================
+
+schema_version: 1
+
+doc_types:
+
+  # ==========================================================================
+  # HIGH-PRIORITY DISAMBIGUATION (multi-token, phải đặt đầu để không bị "So dat"
+  # match trước "So dat NN" hay "DKKD" match trước CCCD)
+  # ==========================================================================
+  - tag: So dat NN
+    folder: Employment
+    description: "Sổ đỏ đất NÔNG NGHIỆP (đất canh tác / vườn / ruộng) — dùng chứng minh nghề nông"
+    patterns:
+      doc_type:
+        - so do nong nghiep
+        - so dat nong nghiep
+        - dat nong nghiep
+        - dat canh tac
+        - gcn quyen su dung dat nong nghiep
+      filename: []
+    in_checklist: [FARM-13-14, "19.1", "19.3", "19.4", "19.5", "19.6", "19.7"]
+
+  - tag: DKKD
+    folder: Employment
+    description: "Đăng ký kinh doanh / GCN đăng ký HTX / GCN đăng ký doanh nghiệp"
+    patterns:
+      doc_type:
+        - dkkd
+        - dang ky kinh doanh
+        - chung nhan dang ky kinh doanh
+        - gcn dang ky doanh nghiep
+        - gcn dang ky htx
+        - dang ky htx
+        - chung nhan dang ky htx
+        - hop tac xa
+        - dang ky doanh nghiep
+      filename: ['\bdkkd\b', 'dang\s*ky\s*kinh\s*doanh', '\bhtx\b']
+    in_checklist: [FARM-13-14]
+
+  # ==========================================================================
+  # PERSONAL DOCS
+  # ==========================================================================
+  - tag: CCCD
+    folder: Personal Docs
+    description: "Căn cước công dân — thẻ 2 mặt có ảnh chân dung + chip/QR. KHÔNG phải tờ tự khai có ô số CCCD."
+    patterns:
+      doc_type: ['\bcccd\b', can cuoc cong dan, chung minh nhan dan, cmnd]
+      filename: ['\bcccd\b', '\bcmnd\b']
+    in_checklist: [FARM-5, "4.1", "4.2", "4.3"]
+
+  - tag: Passport
+    folder: Personal Docs
+    description: "Hộ chiếu — cuốn hộ chiếu có trang bio-data + visa + mộc xuất nhập cảnh"
+    patterns:
+      doc_type: [ho chieu, passport]
+      filename: ['ho\s*chieu', 'passport']
+    in_checklist: [FARM-1, "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7"]
+
+  - tag: GKS
+    folder: Personal Docs
+    description: "Giấy khai sinh / trích lục khai sinh"
+    patterns:
+      doc_type: [khai sinh, trich luc khai sinh, '\bgks\b']
+      filename: ['\bgks\b', 'giay\s*ks', 'khai\s*sinh']
+    in_checklist: [FARM-2, "2.1", "2.2", "2.3"]
+
+  - tag: GKH
+    folder: Personal Docs
+    description: "Giấy đăng ký kết hôn / hôn thư"
+    patterns:
+      doc_type: [ket hon, hon thu, dang ky ket hon]
+      filename: ['\bgkh\b', 'ket\s*hon', 'hon\s*thu']
+    in_checklist: [FARM-3, "3.1", "3.2"]
+
+  - tag: Ly hon
+    folder: Personal Docs
+    description: "Quyết định / bản án / đơn ly hôn"
+    patterns:
+      doc_type:
+        - '\bly hon\b'
+        - don ly hon
+        - quyet dinh ly hon
+        - ban an ly hon
+        - thoa thuan ly hon
+        - don thuan tinh ly hon
+      filename: ['\bly\s*hon\b', '\bqd\s*ly\s*hon\b']
+    in_checklist: ["3.3"]
+
+  - tag: XN hoc
+    folder: Personal Docs
+    description: "Giấy xác nhận học sinh/sinh viên — do NHÀ TRƯỜNG cấp, có logo trường + con dấu đỏ + chữ ký hiệu trưởng. KHÔNG nhầm với CV/sơ yếu lý lịch"
+    patterns:
+      doc_type: [xac nhan hoc, xn hoc, giay xn hoc]
+      filename: []
+    in_checklist: [FARM-4]
+
+  - tag: XNCT
+    folder: Personal Docs
+    description: "Giấy xác nhận cư trú CT07 — đủ TẤT CẢ thành viên đang sống cùng địa chỉ"
+    patterns:
+      doc_type: [cu tru, xac nhan cu tru, xnct]
+      filename: ['\bxnct\b', 'cu\s*tru']
+    in_checklist: [FARM-6, "5.1", "5.2"]
+
+  - tag: LLTP
+    folder: Personal Docs
+    description: "Phiếu lý lịch tư pháp số 2 — còn hạn ≤6 tháng tính từ ngày cấp đến ngày nộp visa"
+    patterns:
+      doc_type: [ly lich tu phap, lltp, phieu ll]
+      filename: ['\blltp\b', 'ly\s*lich\s*tu\s*phap']
+    in_checklist: [FARM-7, "6.1", "6.2", "6.3"]
+
+  - tag: Hien mau
+    folder: Personal Docs
+    description: "Giấy chứng nhận hiến máu — chứng minh hoạt động cộng đồng (tăng ràng buộc tại VN)"
+    patterns:
+      doc_type:
+        - hien mau
+        - chung nhan hien mau
+        - giay chung nhan hien mau
+        - don hien mau
+        - so hien mau
+      filename: ['\bhien\s*mau\b']
+    in_checklist: [FARM-24]
+
+  - tag: GPLX
+    folder: Personal Docs
+    description: "Giấy phép lái xe (máy/ô tô) — A1/A/B1/B2/C"
+    patterns:
+      doc_type: [giay phep lai xe, gplx, bang lai]
+      filename: ['\bgplx\b', 'bang\s*lai', 'giay\s*phep\s*lai\s*xe']
+    in_checklist: [FARM-8, "7.1"]
+
+  - tag: Anh the
+    folder: Personal Docs
+    description: "Ảnh thẻ 5x7 phông trắng — 1 người, đầu+vai, KHÔNG có cảnh vật/hoạt động. KHÔNG phải ảnh chân dung in TRÊN CCCD/passport"
+    patterns:
+      doc_type:
+        - anh the
+        - hinh the
+        - 'the\s*\d\s*x\s*\d'
+        - 'anh\s*\d\s*x\s*\d'
+        - 'anh\s*ho\s*chieu'
+        - 'id\s*photo'
+        - 'passport\s*photo'
+      filename: ['\banh\s*the\b', 'id\s*photo', 'passport\s*photo', '\bportrait\b', '\b\d\s*x\s*\d\b']
+    in_checklist: [FARM-9, "8.1", "8.2", "8.3"]
+
+  - tag: BHXH
+    folder: Personal Docs
+    description: "Biên lai BHXH tự nguyện — 3 tháng gần nhất, có dấu đỏ + chữ ký người thu/nộp"
+    patterns:
+      doc_type: ['\bbhxh\b', bao hiem xa hoi]
+      filename: ['\bbhxh\b']
+    in_checklist: [FARM-19a, "20.1", "20.2", "20.3", "20.4", "20.5"]
+
+  - tag: BHYT
+    folder: Personal Docs
+    description: "Biên lai BHYT / thẻ BHYT — còn hiệu lực"
+    patterns:
+      doc_type: ['\bbhyt\b', bao hiem y te, the bao hiem y te]
+      filename: ['\bbhyt\b']
+    in_checklist: [FARM-19b, "20.1", "20.2", "20.3", "20.4", "20.5"]
+
+  - tag: IOM
+    folder: Personal Docs
+    description: "IOM e-Medical information sheet — giấy khám sức khoẻ tại IOM, còn hạn ≤12 tháng"
+    patterns:
+      doc_type: ['\biom\b']
+      filename: ['\biom\b']
+    in_checklist: [FARM-20, "10.1", "10.2"]
+
+  - tag: CV
+    folder: Personal Docs
+    description: "Sơ yếu lý lịch / CV / Thông tin cá nhân (tự khai). Tờ TỰ ĐIỀN/VIẾT TAY của KH, KHÔNG phải giấy chính thức"
+    patterns:
+      doc_type:
+        - '\bcv\b'
+        - curriculum vitae
+        - so yeu ly lich
+        - so yeu
+        - syll
+        - thong tin ca nhan
+        - thong tin gia dinh
+        - tu khai
+        - to khai
+        - phieu thong tin
+        - phieu khai
+        - bieu mau
+      filename: ['\bsyll\b', 'so\s*yeu\s*ly\s*lich', 'thong\s*tin\s*ca\s*nhan', 'to\s*khai']
+    in_checklist: [FARM-21, "11.1", "11.2", "11.3"]
+
+  - tag: The Visa-MC
+    folder: Personal Docs
+    description: "Thẻ Visa/Mastercard quốc tế (ảnh 2 mặt). DÙNG: Techcombank/MB Bank. CẤM: Ever-link VCB, Agribank, MB Hybrid"
+    patterns:
+      doc_type: [the tin dung, credit card, the visa, the mc, mastercard, visa card, the ngan hang]
+      filename: ['the\s*tin\s*dung', 'credit\s*card', 'mastercard', 'visa\s*card', 'the\s*visa', 'the\s*mc']
+    in_checklist: [FARM-22, "12.1", "12.2"]
+
+  - tag: Bang khen
+    folder: Personal Docs
+    description: "Giấy khen / bằng khen / thư cảm ơn / huy chương — chứng minh hoạt động cộng đồng"
+    patterns:
+      doc_type: [bang khen, giay khen, huy chuong]
+      filename: []
+    in_checklist: [FARM-24]
+
+  - tag: Anh gia dinh
+    folder: Personal Docs
+    description: "Ảnh chụp gia đình (cưới, đi chơi, sinh nhật, lễ tết…). Nhiều người, có ngữ cảnh sinh hoạt"
+    patterns:
+      doc_type:
+        - anh gia dinh
+        - anh chup gia dinh
+        - family photo
+        - tiec sinh nhat
+        - tiec day thang
+        - happy full moon
+        - happy 1 month
+        - day thang
+      filename: []
+    in_checklist: [FARM-25]
+
+  # ==========================================================================
+  # EDUCATION
+  # ==========================================================================
+  - tag: Bang cap
+    folder: Education
+    description: "Bằng cấp các cấp (cấp 2/3, trung cấp, cao đẳng, đại học) + chứng chỉ nghề/tiếng Anh"
+    patterns:
+      doc_type:
+        - bang cap
+        - bang tot nghiep
+        - chung chi
+        - bang dai hoc
+        - bang trung cap
+        - bang cao dang
+        - diploma
+      filename: ['bang\s*cap', 'bang\s*tot\s*nghiep', 'diploma']
+    in_checklist: [FARM-10, "9.1", "9.2", "9.3"]
+
+  # ==========================================================================
+  # ASSET
+  # ==========================================================================
+  - tag: So dat
+    folder: Asset
+    description: "Sổ đỏ / sổ hồng / GCNQSDĐ (đất ở hoặc đất tài sản chung). KHÔNG đang thế chấp"
+    patterns:
+      doc_type:
+        - so do
+        - so hong
+        - quyen su dung dat
+        - gcn quyen su dung dat
+        - bia dat
+        - giay chung nhan quyen su dung dat
+      filename: ['so\s*do', 'so\s*hong', 'bia\s*dat', '\bqsdd\b']
+    in_checklist: [FARM-11-12, "13.1", "13.2", "13.3", "13.4", "13.5"]
+
+  - tag: HD cho-tang-thua ke
+    folder: Asset
+    description: "Hợp đồng cho/tặng tài sản hoặc văn bản thừa kế. Phải công chứng + người tặng là người thân"
+    patterns:
+      doc_type: [cho tang, tang cho, thua ke, hd cho, hd tang]
+      filename: ['cho\s*tang', 'tang\s*cho', 'thua\s*ke']
+    in_checklist: [FARM-11-12, "14.1", "14.2", "14.3"]
+
+  - tag: STK
+    folder: Asset
+    description: "Sổ tiết kiệm (sổ cứng) — đứng tên đương đơn, ≥300tr, kỳ hạn ≥6 tháng, số dư KHÔNG tròn"
+    patterns:
+      doc_type: [so tiet kiem, '\bstk\b', sotk]
+      filename: ['\bstk\b', 'so\s*tiet\s*kiem']
+    in_checklist: [FARM-15, "15.1", "15.2", "15.3"]
+
+  - tag: XN so du
+    folder: Asset
+    description: "Giấy xác nhận số dư STK (EN/song ngữ, có quy đổi USD)"
+    patterns:
+      doc_type: [xac nhan so du, xn so du, xnsd]
+      filename: ['\bxnsd\b', 'xn\s*so\s*du']
+    in_checklist: [FARM-16, "16.1"]
+
+  - tag: Ca vet xe
+    folder: Asset
+    description: "Cà vẹt xe ô tô / mô tô — đứng tên đương đơn/vc/bm; nơi đăng ký khớp địa chỉ thường trú"
+    patterns:
+      doc_type:
+        - ca vet
+        - cavet
+        - dang ky xe
+        - dk xe
+        - chung nhan dang ky xe
+        - chung nhan dang ky xe mo to
+      filename: ['\bdk\s*xe\b', 'cavet', 'ca\s*vet', 'dang\s*ky\s*xe']
+    in_checklist: [FARM-18, "17.1", "17.2"]
+
+  - tag: Vang
+    folder: Asset
+    description: "Hoá đơn mua vàng/bạc — có tên đương đơn; 3-4 hoá đơn cách xa, 2-3 chỉ/lần"
+    patterns:
+      doc_type: ['\bvang\b', vang mieng, '\bsjc\b']
+      filename: ['\bvang\b', '\bsjc\b']
+    in_checklist: [FARM-18, "18.1", "18.2", "18.3"]
+
+  # ==========================================================================
+  # EMPLOYMENT (extras)
+  # ==========================================================================
+  - tag: Dai ly NS
+    folder: Employment
+    description: "Thông tin 2 đại lý nông sản/phân bón — họ tên chủ + địa chỉ + CCCD + SĐT + danh thiếp"
+    patterns:
+      doc_type: [dai ly nong san, dai ly phan bon, dai ly thuc an, nong san]
+      filename: []
+    in_checklist: [FARM-23, "21.1", "21.2"]
+
+  - tag: Anh-video lam nong
+    folder: Employment
+    description: "Ảnh / video đương đơn đang LÀM NÔNG (ruộng/vườn/nhà kính/chăm cây/trồng hoa). Có người làm việc, có cây trồng"
+    patterns:
+      doc_type:
+        - anh.*lam nong
+        - video.*lam nong
+        - lam nong
+        - cham soc cay
+        - nha kinh
+        - trong hoa
+        - cay trong
+        - vuon hoa
+        - hoa cuc
+      filename: []
+    in_checklist: [FARM-26, "22.1"]
+
+  - tag: Sao ke
+    folder: Employment
+    description: "Sao kê ngân hàng — số TK + kỳ sao kê + danh sách giao dịch nhiều dòng + số dư đầu/cuối. KHÔNG phải ảnh thẻ visa scan"
+    patterns:
+      doc_type: [sao ke, sao ke ngan hang]
+      filename: ['sao\s*ke']
+    in_checklist: [FARM-17]
+
+  - tag: HDLD
+    folder: Employment
+    description: "Hợp đồng lao động / hợp đồng làm việc"
+    patterns:
+      doc_type: [hop dong lao dong, hdld, hop dong lam viec]
+      filename: ['\bhdld\b', 'hop\s*dong\s*lao\s*dong']
+    in_checklist: []
+
+  - tag: Bien lai
+    folder: Employment
+    description: "Biên lai thu tiền / hoá đơn thu tiền (bán nông sản, thu lương…)"
+    patterns:
+      doc_type: [bien lai, hoa don thu tien]
+      filename: []
+    in_checklist: []

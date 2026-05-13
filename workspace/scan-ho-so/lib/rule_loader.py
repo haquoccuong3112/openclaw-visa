@@ -20,6 +20,8 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 RULES_YAML = DATA_DIR / "rules.yaml"
+DOC_TYPES_YAML = DATA_DIR / "doc_types.yaml"
+RELATIONS_YAML = DATA_DIR / "relations.yaml"
 
 # Severity hợp lệ cho checklist (mục FARM): bat_buoc | ket_hon | co_con | tuy_chon | lam_sau
 CHECKLIST_SEVERITIES = {"bat_buoc", "ket_hon", "co_con", "tuy_chon", "lam_sau"}
@@ -39,6 +41,17 @@ class ChecklistItem:
     def is_required(self) -> bool:
         """Mục bắt buộc — tính vào "X/18"."""
         return self.severity == "bat_buoc"
+
+
+@dataclass(frozen=True)
+class DocType:
+    """1 loại giấy tờ bot phân loại (vd CCCD, So dat, Sao ke)."""
+    tag: str                       # SOP tag — dùng trong filename
+    folder: str                    # Personal Docs | Education | Asset | Employment
+    description: str               # 1 câu cho LLM hiểu loại này
+    doc_type_patterns: tuple[str, ...]   # regex match raw_doc_type từ Gemini
+    filename_patterns: tuple[str, ...]   # regex match tên file
+    in_checklist: tuple[str, ...]  # rule code FARM/v1.1 mà tag này thuộc về
 
 
 @dataclass(frozen=True)
@@ -149,6 +162,48 @@ def load_validations() -> tuple[ValidationRule, ...]:
             applies_to=tuple(str(t).strip() for t in applies_to_raw),
             rule=rule_text, action=action,
             condition=condition, needs_llm=needs_llm,
+        ))
+    return tuple(out)
+
+
+@lru_cache(maxsize=1)
+def load_doc_types() -> tuple[DocType, ...]:
+    """Trả tuple DocType từ doc_types.yaml (Phase 4 data-driven)."""
+    if not DOC_TYPES_YAML.exists():
+        return tuple()
+    data = _load_yaml(DOC_TYPES_YAML)
+    raw = data.get("doc_types") or []
+    if not isinstance(raw, list):
+        raise ValueError("doc_types.yaml: 'doc_types' phải là list")
+    out: list[DocType] = []
+    seen_tags: set[str] = set()
+    for i, r in enumerate(raw, 1):
+        if not isinstance(r, dict):
+            raise ValueError(f"doc_types.yaml[{i}]: phải là dict")
+        try:
+            tag = str(r["tag"]).strip()
+            folder = str(r["folder"]).strip()
+            description = str(r.get("description", "")).strip()
+            patterns = r.get("patterns") or {}
+            dt_pats = patterns.get("doc_type") or []
+            fn_pats = patterns.get("filename") or []
+        except KeyError as e:
+            raise ValueError(f"doc_types.yaml[{i}]: thiếu field {e}") from e
+        if tag in seen_tags:
+            raise ValueError(f"doc_types.yaml[{i}]: tag '{tag}' bị trùng")
+        seen_tags.add(tag)
+        if not isinstance(dt_pats, list) or not all(isinstance(p, str) for p in dt_pats):
+            raise ValueError(f"doc_types.yaml[{i}] tag={tag}: doc_type patterns phải list[str]")
+        if not isinstance(fn_pats, list) or not all(isinstance(p, str) for p in fn_pats):
+            raise ValueError(f"doc_types.yaml[{i}] tag={tag}: filename patterns phải list[str]")
+        in_cl = r.get("in_checklist") or []
+        if not isinstance(in_cl, list):
+            in_cl = []
+        out.append(DocType(
+            tag=tag, folder=folder, description=description,
+            doc_type_patterns=tuple(dt_pats),
+            filename_patterns=tuple(fn_pats),
+            in_checklist=tuple(str(x).strip() for x in in_cl),
         ))
     return tuple(out)
 

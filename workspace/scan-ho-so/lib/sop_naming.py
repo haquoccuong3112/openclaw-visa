@@ -17,51 +17,25 @@ from typing import Optional
 # ============================================================
 # SOP §10.6 abbreviations + extensions
 # Order matters: more specific / multi-word patterns FIRST.
-DOC_TYPE_PATTERNS: list[tuple[str, str, str]] = [
-    # ---- HIGH-PRIORITY DISAMBIGUATION (multi-token, must come first) ----
-    # Đất nông nghiệp → Employment (SOP §9.4)
-    (r"so do nong nghiep|so dat nong nghiep|dat nong nghiep|dat canh tac|gcn quyen su dung dat nong nghiep", "So dat NN", "Employment"),
-    # DKKD / HTX / doanh nghiệp (phải trước CCCD vì cùng "chung nhan")
-    (r"dkkd|dang ky kinh doanh|chung nhan dang ky kinh doanh|gcn dang ky doanh nghiep|gcn dang ky htx|dang ky htx|chung nhan dang ky htx|hop tac xa|dang ky doanh nghiep", "DKKD", "Employment"),
+def _load_doc_types_from_yaml():
+    """Load doc_types từ data/doc_types.yaml và build DOC_TYPE_PATTERNS + FILENAME_HINTS.
+    Robust import — work cả khi sop_naming.py chạy standalone lẫn import như package."""
+    try:
+        from .rule_loader import load_doc_types
+    except ImportError:
+        from rule_loader import load_doc_types  # type: ignore  # noqa
+    dt_pats: list[tuple[str, str, str]] = []
+    fn_hints: list[tuple[str, str, str]] = []
+    for dt in load_doc_types():
+        if dt.doc_type_patterns:
+            # Gom mọi pattern của 1 tag thành 1 regex `a|b|c` để khớp DOC_TYPE_PATTERNS cũ.
+            combined = "|".join(dt.doc_type_patterns)
+            dt_pats.append((combined, dt.tag, dt.folder))
+        for p in dt.filename_patterns:
+            fn_hints.append((p, dt.tag, dt.folder))
+    return dt_pats, fn_hints
 
-    # ---- Personal Docs ----
-    (r"\bcccd\b|can cuoc cong dan|chung minh nhan dan|cmnd", "CCCD", "Personal Docs"),
-    (r"ho chieu|passport", "Passport", "Personal Docs"),
-    (r"khai sinh|trich luc khai sinh|\bgks\b", "GKS", "Personal Docs"),
-    (r"ket hon|hon thu|dang ky ket hon", "GKH", "Personal Docs"),
-    (r"xac nhan hoc|xn hoc|giay xn hoc", "XN hoc", "Personal Docs"),
-    (r"cu tru|xac nhan cu tru|xnct", "XNCT", "Personal Docs"),
-    (r"ly lich tu phap|lltp|phieu ll", "LLTP", "Personal Docs"),
-    (r"hien mau|chung nhan hien mau|giay chung nhan hien mau|don hien mau|so hien mau", "Hien mau", "Personal Docs"),
-    (r"\bly hon\b|don ly hon|quyet dinh ly hon|ban an ly hon|thoa thuan ly hon|don thuan tinh ly hon", "Ly hon", "Personal Docs"),
-    (r"giay phep lai xe|gplx|bang lai", "GPLX", "Personal Docs"),
-    (r"anh the|hinh the|the\s*\d\s*x\s*\d|anh\s*\d\s*x\s*\d|anh\s*ho\s*chieu|id\s*photo|passport\s*photo", "Anh the", "Personal Docs"),
-    (r"\bbhxh\b|bao hiem xa hoi", "BHXH", "Personal Docs"),
-    (r"\bbhyt\b|bao hiem y te|the bao hiem y te", "BHYT", "Personal Docs"),
-    (r"\biom\b", "IOM", "Personal Docs"),
-    (r"\bcv\b|curriculum vitae|so yeu ly lich|so yeu|syll|thong tin ca nhan|thong tin gia dinh|tu khai|to khai|phieu thong tin|phieu khai|bieu mau", "CV", "Personal Docs"),
-    (r"the tin dung|credit card|the visa|the mc|mastercard|visa card|the ngan hang", "The Visa-MC", "Personal Docs"),
-    (r"bang khen|giay khen|huy chuong", "Bang khen", "Personal Docs"),
-    (r"anh gia dinh|anh chup gia dinh|family photo|tiec sinh nhat|tiec day thang|happy full moon|happy 1 month|day thang", "Anh gia dinh", "Personal Docs"),
-
-    # ---- Education ----
-    (r"bang cap|bang tot nghiep|chung chi|bang dai hoc|bang trung cap|bang cao dang|diploma", "Bang cap", "Education"),
-
-    # ---- Asset ----
-    (r"so do|so hong|quyen su dung dat|gcn quyen su dung dat|bia dat|giay chung nhan quyen su dung dat", "So dat", "Asset"),
-    (r"cho tang|tang cho|thua ke|hd cho|hd tang", "HD cho-tang-thua ke", "Asset"),
-    (r"so tiet kiem|\bstk\b|sotk", "STK", "Asset"),
-    (r"xac nhan so du|xn so du|xnsd", "XN so du", "Asset"),
-    (r"ca vet|cavet|dang ky xe|dk xe|chung nhan dang ky xe|chung nhan dang ky xe mo to", "Ca vet xe", "Asset"),
-    (r"\bvang\b|vang mieng|\bsjc\b", "Vang", "Asset"),
-
-    # ---- Employment (extras) ----
-    (r"dai ly nong san|dai ly phan bon|dai ly thuc an|nong san", "Dai ly NS", "Employment"),
-    (r"anh.*lam nong|video.*lam nong|lam nong|cham soc cay|nha kinh|trong hoa|cay trong|vuon hoa|hoa cuc", "Anh-video lam nong", "Employment"),
-    (r"sao ke|sao ke ngan hang", "Sao ke", "Employment"),
-    (r"hop dong lao dong|hdld|hop dong lam viec", "HDLD", "Employment"),
-    (r"bien lai|hoa don thu tien", "Bien lai", "Employment"),
-]
+DOC_TYPE_PATTERNS, _FILENAME_HINTS_FROM_YAML = _load_doc_types_from_yaml()
 
 # Default fallback when nothing matches
 DEFAULT_TAG = "Khac"
@@ -139,34 +113,9 @@ class Classification:
     needs_review: bool
 
 
-# Strong filename hints — if a tag keyword is in the filename it usually wins,
-# even when Gemini's doc_type disagrees (per Cường's note: "thiếu cứ bổ sung
-# theo tên file"). Order: most specific first.
-FILENAME_HINTS: list[tuple[str, str, str]] = [
-    (r"\bbhxh\b", "BHXH", "Personal Docs"),
-    (r"\bbhyt\b", "BHYT", "Personal Docs"),
-    (r"\bcccd\b|\bcmnd\b", "CCCD", "Personal Docs"),
-    (r"\bgks\b|giay\s*ks|khai\s*sinh", "GKS", "Personal Docs"),
-    (r"\bgkh\b|ket\s*hon|hon\s*thu", "GKH", "Personal Docs"),
-    (r"\blltp\b|ly\s*lich\s*tu\s*phap", "LLTP", "Personal Docs"),
-    (r"\bgplx\b|bang\s*lai|giay\s*phep\s*lai\s*xe", "GPLX", "Personal Docs"),
-    (r"\banh\s*the\b|id\s*photo|passport\s*photo|\bportrait\b|\b\d\s*x\s*\d\b", "Anh the", "Personal Docs"),
-    (r"\bxnct\b|cu\s*tru", "XNCT", "Personal Docs"),
-    (r"\bhien\s*mau\b", "Hien mau", "Personal Docs"),
-    (r"\bly\s*hon\b|\bqd\s*ly\s*hon\b", "Ly hon", "Personal Docs"),
-    (r"\biom\b", "IOM", "Personal Docs"),
-    (r"\bsyll\b|so\s*yeu\s*ly\s*lich|thong\s*tin\s*ca\s*nhan|to\s*khai", "CV", "Personal Docs"),
-    (r"ho\s*chieu|passport", "Passport", "Personal Docs"),
-    (r"the\s*tin\s*dung|credit\s*card|mastercard|visa\s*card|the\s*visa|the\s*mc", "The Visa-MC", "Personal Docs"),
-    (r"\bdkkd\b|dang\s*ky\s*kinh\s*doanh|\bhtx\b", "DKKD", "Employment"),
-    (r"\bhdld\b|hop\s*dong\s*lao\s*dong", "HDLD", "Employment"),
-    (r"sao\s*ke", "Sao ke", "Employment"),
-    (r"\bstk\b|so\s*tiet\s*kiem", "STK", "Asset"),
-    (r"\bxnsd\b|xn\s*so\s*du", "XN so du", "Asset"),
-    (r"so\s*do|so\s*hong|bia\s*dat|qsdd", "So dat", "Asset"),
-    (r"\bdk\s*xe\b|cavet|ca\s*vet|dang\s*ky\s*xe", "Ca vet xe", "Asset"),
-    (r"\bvang\b|\bsjc\b", "Vang", "Asset"),
-]
+# FILENAME_HINTS — load từ data/doc_types.yaml ở module-import (Phase 4 data-driven).
+# Strong filename hints: tag keyword trong tên file thường win, kể cả khi Gemini doc_type khác.
+FILENAME_HINTS: list[tuple[str, str, str]] = _FILENAME_HINTS_FROM_YAML
 
 
 def classify_doc_type(
