@@ -1075,7 +1075,20 @@ def main(argv=None) -> int:
         if not args.dry_run and case_folder_id and not args.no_checklist:
             try:
                 from lib import checklist as _ck
-                if args.checklist_only or _ck.should_run_checklist(manifest):
+                # Fix A: skip thẩm định nếu batch không có file mới (toàn dedup-by-hash).
+                # /check (checklist_only) luôn chạy fresh; /oldfile + batch Telegram chỉ chạy
+                # nếu có ≥1 file mới thật sự (uploaded + uploaded-split > 0).
+                _counts = manifest.get("counts", {}) or {}
+                _n_new = _counts.get("uploaded", 0) + _counts.get("uploaded-split", 0)
+                _skip_unchanged = (not args.checklist_only) and _n_new == 0
+                _do_run = args.checklist_only or (_ck.should_run_checklist(manifest) and not _skip_unchanged)
+
+                if _skip_unchanged:
+                    log("skip thẩm định: batch không có file mới (toàn dedup) — báo cáo trước vẫn còn hiệu lực")
+                    manifest["checklist"] = {"ran": False, "skipped": "no-new-files",
+                                              "reason": "Batch không có file mới (toàn dedup-by-hash); báo cáo trước vẫn còn hiệu lực"}
+
+                if _do_run:
                     log("running AI checklist ...")
                     ck = _ck.run_and_write(case_folder_id, applicant, SHARED_DRIVE_ID,
                                            batch_items=items, today=today_vn,

@@ -786,24 +786,28 @@ def _write_google_doc(case_folder_id: str, name: str, md_text: str, drive_id: st
     import tempfile
     from googleapiclient.http import MediaFileUpload
     from .google_clients import drive
-    from .drive_helpers import find_file_by_name, delete_file
+    from .drive_helpers import find_file_by_name
     DOC_MIME = "application/vnd.google-apps.document"
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
         fh.write(md_text)
         mpath = fh.name
     try:
-        old = find_file_by_name(name, case_folder_id, drive_id, mime_type=DOC_MIME)
-        if old:
-            try:
-                delete_file(old, drive_id)
-            except Exception:
-                pass
+        existing = find_file_by_name(name, case_folder_id, drive_id, mime_type=DOC_MIME)
         media = MediaFileUpload(mpath, mimetype="text/markdown", resumable=False)
-        body = {"name": name, "mimeType": DOC_MIME, "parents": [case_folder_id]}
-        kwargs = dict(body=body, media_body=media, fields="id, webViewLink")
-        if drive_id:
-            kwargs["supportsAllDrives"] = True
-        f = drive().files().create(**kwargs).execute()
+        if existing:
+            # Fix B: update content in place → giữ Doc ID + webViewLink → link cũ
+            # trong tin Telegram vẫn click được. Drive auto-lưu version history (File →
+            # Version history) — anh xem revision trước qua UI Google Docs.
+            update_kwargs = dict(fileId=existing, media_body=media, fields="id, webViewLink")
+            if drive_id:
+                update_kwargs["supportsAllDrives"] = True
+            f = drive().files().update(**update_kwargs).execute()
+        else:
+            body = {"name": name, "mimeType": DOC_MIME, "parents": [case_folder_id]}
+            create_kwargs = dict(body=body, media_body=media, fields="id, webViewLink")
+            if drive_id:
+                create_kwargs["supportsAllDrives"] = True
+            f = drive().files().create(**create_kwargs).execute()
         return f.get("webViewLink") or f"https://docs.google.com/document/d/{f['id']}/edit"
     finally:
         try:
