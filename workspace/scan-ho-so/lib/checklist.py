@@ -395,6 +395,15 @@ giấy tờ, dạng:
 → Khách đã nộp {{HAVE}}/{{REQUIRED}} mục BẮT BUỘC trong CHECKLIST HỒ SƠ FARM. {{MISSING_NOTE}}
 Mục đánh dấu "— không áp dụng" / "— tùy chọn" / "— sẽ làm sau" thì ĐỪNG liệt kê là "thiếu" trong PHẦN 3.
 
+# THAM KHẢO — DANH SÁCH RULE KIỂM TRA GIẤY TỜ (theo HƯỚNG DẪN CHECK HỒ SƠ v1.1)
+Mỗi rule có MÃ CODE (vd `13.3`, `19.4`). Khi báo lỗi ở PHẦN 3, ghi rõ code: "Lỗi #N [13.3]: …".
+🔴 = reject (giấy KHÔNG dùng được, BÁO ngay) · 🟡 = warn (cần làm rõ) · 🟢 = info (ghi nhận / nhắc)
+Áp dụng đúng `áp dụng:` của mỗi rule — KHÔNG áp dụng rule lên giấy không thuộc tag đó.
+
+{{RULES_BLOCK}}
+
+{{DETERMINISTIC_ERRORS}}
+
 # FORMAT ĐẦU RA BẮT BUỘC
 
 Xuất kết quả theo đúng 4 phần dưới đây, không thêm bớt, viết bằng tiếng Việt như một chuyên viên
@@ -456,9 +465,26 @@ BẮT ĐẦU RÀ SOÁT NGAY KHI NHẬN ĐƯỢC HỒ SƠ OCR. KHÔNG HỎI THÊM
 NẾU OCR THIẾU MỘT LOẠI GIẤY TỜ → GHI VÀO PHẦN 3 DẠNG "THIẾU GIẤY TỜ" CHỨ KHÔNG DỪNG LẠI."""
 
 
-def _build_prompt(today: str, applicant: str, coverage: dict) -> str:
+def _build_prompt(today: str, applicant: str, coverage: dict,
+                  deterministic_errors: list[dict] | None = None) -> str:
     missing_note = ("Còn thiếu (bắt buộc): " + ", ".join(coverage["missing"]) + "."
                     if coverage["missing"] else f"Đã đủ {coverage['required']} mục bắt buộc.")
+    # Inject rule references từ rules.yaml (data-driven Phase 2 + 3).
+    try:
+        from .rule_loader import generate_rules_block
+    except ImportError:
+        from rule_loader import generate_rules_block  # type: ignore  # noqa
+    rules_block = generate_rules_block()
+    # Tin do bot pre-check deterministic — LLM phải tin tưởng và đưa vào báo cáo PHẦN 3.
+    det_block = ""
+    if deterministic_errors:
+        lines = [
+            "## ⚠️ LỖI BOT ĐÃ PHÁT HIỆN (deterministic check, COI LÀ ĐÚNG — phải đưa vào PHẦN 3 báo cáo):",
+        ]
+        for e in deterministic_errors:
+            lines.append(f"- 🔴 [{e['code']}] file `{e.get('ten','?')}` (tag {e.get('tag','?')}): "
+                         f"{e['msg']} → {e.get('action','')}")
+        det_block = "\n".join(lines)
     repl = {
         "{{TODAY}}": today,
         "{{APPLICANT}}": applicant or "(không rõ tên)",
@@ -467,6 +493,8 @@ def _build_prompt(today: str, applicant: str, coverage: dict) -> str:
         "{{HAVE}}": str(coverage["have"]),
         "{{REQUIRED}}": str(coverage["required"]),
         "{{MISSING_NOTE}}": missing_note,
+        "{{RULES_BLOCK}}": rules_block,
+        "{{DETERMINISTIC_ERRORS}}": det_block,
     }
     s = CHECKLIST_PROMPT_TEMPLATE
     for k, v in repl.items():
@@ -602,13 +630,39 @@ def extract_profile_data(dataset: list[dict], applicant: str, today: str,
 # TẦNG 2 — đánh giá business-logic LMIA → báo cáo Markdown 4 phần (model reasoning)
 # ===========================================================================
 def evaluate_profile_logic(profile, applicant: str, today: str, coverage: dict,
-                           model: str | None = None, n_docs: int | None = None) -> dict:
+                           model: str | None = None, n_docs: int | None = None,
+                           dataset: list[dict] | None = None) -> dict:
     """TẦNG 2: đọc hồ sơ đã chuẩn hoá (dict) — hoặc dataset thô (list, fallback) — + prompt thẩm định
-    → báo cáo Markdown 4 phần. Trả {report_text, model_used, n_docs} hoặc {report_text:None, error}."""
+    → báo cáo Markdown 4 phần. Trả {report_text, model_used, n_docs} hoặc {report_text:None, error}.
+
+    `dataset` (Phase 3 data-driven): dataset thô từ build_dataset() — cho phép rule_engine chạy
+    deterministic pre-check (vd thế chấp sổ đỏ, LLTP hết hạn) NGOÀI LLM rồi đưa kết quả vào prompt.
+    """
     model = model or CHECKLIST_MODEL
     if n_docs is None:
         n_docs = len(profile) if isinstance(profile, list) else len((profile or {}).get("documents") or [])
-    system = _build_prompt(today, applicant, coverage)
+    # Pre-check deterministic — chạy 11 rule có condition trong rules.yaml, đưa kết quả cho LLM tin tưởng.
+    det_errors: list[dict] = []
+    try:
+        try:
+            from .rule_loader import load_validations
+            from .rule_engine import detect_deterministic_errors
+        except ImportError:
+            from rule_loader import load_validations          # type: ignore  # noqa
+            from rule_engine import detect_deterministic_errors  # type: ignore  # noqa
+        # Ưu tiên dataset thô (có du_lieu nguyên trạng); fallback dùng profile.documents
+        eval_dataset = dataset if isinstance(dataset, list) else (
+            profile if isinstance(profile, list) else (profile or {}).get("documents") or []
+        )
+        if eval_dataset:
+            det_errors = detect_deterministic_errors(list(load_validations()), eval_dataset)
+            if det_errors:
+                print(f"evaluate_profile_logic: deterministic check phát hiện {len(det_errors)} lỗi "
+                      f"({', '.join(e['code'] for e in det_errors)})", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"evaluate_profile_logic: rule_engine lỗi: {type(e).__name__}: {e} — bỏ qua deterministic",
+              flush=True)
+    system = _build_prompt(today, applicant, coverage, deterministic_errors=det_errors)
     if isinstance(profile, list):
         label = "NỘI DUNG OCR HỒ SƠ (JSON — mỗi phần tử một giấy tờ)"
     else:
@@ -850,7 +904,9 @@ def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
         print(f"checklist: tra cứu địa giới (_dia_gioi) lỗi — bỏ qua: {type(e).__name__}: {e}", flush=True)
 
     # --- Tầng 2: đánh giá business-logic (model reasoning) → báo cáo Markdown -
-    res = evaluate_profile_logic(eval_input, applicant, today, coverage, model=model, n_docs=n_docs)
+    # Truyền `dataset` thô để rule_engine chạy deterministic pre-check (thế chấp, hết hạn…).
+    res = evaluate_profile_logic(eval_input, applicant, today, coverage, model=model, n_docs=n_docs,
+                                 dataset=dataset)
     if not res.get("report_text"):
         return {"ran": False, "error": res.get("error") or "evaluate_profile_logic không trả về báo cáo",
                 "coverage": coverage, "model": res.get("model_used"), "extract_model": extract_model,
