@@ -153,6 +153,56 @@ def load_validations() -> tuple[ValidationRule, ...]:
     return tuple(out)
 
 
+_CAT_LABEL = {
+    "ho_tich": "I. HỒ TỊCH",
+    "tai_san": "II. TÀI SẢN",
+    "tai_chinh": "II.b TÀI CHÍNH",
+    "cong_viec": "III. CÔNG VIỆC",
+    "rang_buoc": "IV. RÀNG BUỘC",
+}
+
+_SEV_ICON = {"reject": "🔴", "warn": "🟡", "info": "🟢"}
+
+
+def generate_rules_block(rules: tuple[ValidationRule, ...] | None = None) -> str:
+    """Sinh section "RULES REFERENCE" cho prompt thẩm định tầng 2.
+
+    Nhóm rule theo category + đánh dấu reject/warn/info, kèm mã code để LLM
+    output báo cáo `Lỗi #N [13.3]:` có rule code traceable.
+    """
+    rules = rules or load_validations()
+    if not rules:
+        return ""
+    # Top section: HARD-REJECT cho rule severity=reject (ưu tiên kiểm tra)
+    rejects = [r for r in rules if r.severity == "reject"]
+    others = [r for r in rules if r.severity != "reject"]
+    lines: list[str] = []
+    if rejects:
+        lines.append("# 🛑 HARD-REJECT CHECKS (giấy KHÔNG dùng được, BÁO NGAY)")
+        lines.append("")
+        for r in rejects:
+            tags = ", ".join(r.applies_to) if r.applies_to else "(mọi)"
+            lines.append(f"- [{r.code}] {r.rule}")
+            lines.append(f"    áp dụng: {tags} · hành động: {r.action}")
+        lines.append("")
+    # Nhóm rule còn lại theo category
+    by_cat: dict[str, list[ValidationRule]] = {}
+    for r in others:
+        by_cat.setdefault(r.category, []).append(r)
+    for cat in ("ho_tich", "tai_san", "tai_chinh", "cong_viec", "rang_buoc"):
+        if cat not in by_cat:
+            continue
+        lines.append(f"# {_CAT_LABEL.get(cat, cat.upper())}")
+        lines.append("")
+        for r in sorted(by_cat[cat], key=lambda x: x.code):
+            tags = ", ".join(r.applies_to) if r.applies_to else "(mọi)"
+            icon = _SEV_ICON.get(r.severity, "·")
+            lines.append(f"- {icon} [{r.code}] {r.rule}")
+            lines.append(f"    áp dụng: {tags}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def _invalidate_caches() -> None:
     """Dùng cho test: clear @lru_cache để reload YAML."""
     load_rules_yaml.cache_clear()
@@ -176,8 +226,24 @@ if __name__ == "__main__":
     assert len(cl) == 26, f"checklist phải có 26 mục, đang có {len(cl)}"
     assert len(bat_buoc) == 18, f"bat_buoc phải = 18, đang = {len(bat_buoc)}"
     assert {"Passport", "CCCD", "GKS", "Sao ke", "Anh gia dinh"} <= {t for c in cl for t in c.tags}
-    # Validations Phase 1 = rỗng
     vs = load_validations()
-    print(f"loaded {len(vs)} validation rules (Phase 1 = 0, Phase 2 sẽ thêm 30+)")
-    assert len(vs) == 0, "Phase 1: validations phải rỗng"
+    print(f"loaded {len(vs)} validation rules")
+    assert len(vs) >= 30, f"validations phải có ≥30 rule (Phase 2), đang có {len(vs)}"
+    by_sev = {}
+    for v in vs:
+        by_sev[v.severity] = by_sev.get(v.severity, 0) + 1
+    print(f"  by severity: {by_sev}")
+    det = [v for v in vs if v.condition]
+    print(f"  deterministic (có condition): {len(det)}")
+    assert len(det) >= 8, "Cần ≥8 rule deterministic (13.3, 19.4, 19.6, 6.2, 12.1…)"
+    # Spot-check rule codes quan trọng có mặt
+    codes = {v.code for v in vs}
+    for c in ("13.3", "19.4", "19.6", "12.1", "6.2"):
+        assert c in codes, f"rule code '{c}' phải có trong rules.yaml"
+    # Test generate prompt block
+    block = generate_rules_block(vs)
+    assert "HARD-REJECT" in block, "prompt block phải có section HARD-REJECT"
+    assert "[13.3]" in block, "rule code 13.3 phải xuất hiện trong block"
+    assert "[19.4]" in block, "rule code 19.4 phải xuất hiện trong block"
+    print(f"  generate_rules_block: {len(block)} chars OK")
     print("OK")

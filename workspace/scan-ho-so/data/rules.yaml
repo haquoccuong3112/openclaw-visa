@@ -168,7 +168,597 @@ checklist:
     severity: lam_sau
 
 # ============================================================================
-# VALIDATION RULES — Phase 2 sẽ migrate 30 rule v1.1 vào đây.
-# Tạm thời để trống; checklist (coverage) đã đủ để Phase 1 chạy.
+# VALIDATION RULES — 56 rule kiểm tra từng giấy tờ (theo v1.1)
 # ============================================================================
-validations: []
+# `condition`: biểu thức rule_engine (Phase 3) eval trên `profile` để
+# deterministic pre-check (không cần LLM). NULL = LLM phải kiểm.
+# `needs_llm`: true ⇒ rule cần LLM (reasoning, cross-validation, visual)
+# ============================================================================
+validations:
+
+  # === I. HỒ TỊCH — HỘ CHIẾU ===
+  - code: "1.1"
+    category: ho_tich
+    severity: warn
+    applies_to: [Passport]
+    rule: "Hộ chiếu còn hạn ≥ 2 năm tính từ ngày dự kiến nộp visa"
+    action: "Nhắc khách xin cấp lại nếu hạn < 2 năm"
+    condition: "years_until(doc.extracted.ngay_het_han) < 2"
+    needs_llm: false
+
+  - code: "1.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [Passport]
+    rule: "Đối chiếu ảnh trên hộ chiếu với ảnh thẻ — phát hiện dấu hiệu phẫu thuật thẩm mỹ"
+    action: "BÁO người phụ trách nếu nghi ngờ"
+    condition: null
+    needs_llm: true
+
+  - code: "1.3"
+    category: ho_tich
+    severity: info
+    applies_to: [Passport]
+    rule: "Chữ ký trong hộ chiếu là chuẩn — toàn bộ hồ sơ phải ký GIỐNG HỆT chữ ký này"
+    action: "Đối chiếu chữ ký xuyên toàn hồ sơ (BHXH/YT, hợp đồng…)"
+    condition: null
+    needs_llm: true
+
+  - code: "1.4"
+    category: ho_tich
+    severity: warn
+    applies_to: [Passport]
+    rule: "Mộc xuất nhập cảnh — phát hiện đi nước ngoài"
+    action: "BÁO người phụ trách (ghi rõ nước nào, thời gian)"
+    condition: null
+    needs_llm: true
+
+  - code: "1.5"
+    category: ho_tich
+    severity: warn
+    applies_to: [Passport]
+    rule: "Nơi sinh trong hộ chiếu khớp giấy khai sinh"
+    action: "Hỏi lại khách + BÁO người phụ trách nếu không khớp"
+    condition: null
+    needs_llm: true
+
+  - code: "1.6"
+    category: ho_tich
+    severity: reject
+    applies_to: [Passport]
+    rule: "Nơi cấp hộ chiếu phải là Việt Nam"
+    action: "BÁO NGAY nếu cấp bởi nước khác"
+    condition: "doc.extracted.noi_cap and 'viet nam' not in lower(doc.extracted.noi_cap)"
+    needs_llm: false
+
+  - code: "1.7"
+    category: ho_tich
+    severity: warn
+    applies_to: [Passport]
+    rule: "Scan đủ TẤT CẢ trang có thông tin, dấu mộc, visa (cả HC cũ + mới)"
+    action: "Yêu cầu khách bổ sung trang còn thiếu"
+    condition: null
+    needs_llm: true
+
+  # === KHAI SINH ===
+  - code: "2.1"
+    category: ho_tich
+    severity: reject
+    applies_to: [GKS]
+    rule: "Họ tên + ngày sinh trên KS khớp 100% với CCCD + HC của đương đơn"
+    action: "Báo lỗi nếu lệch ký tự"
+    condition: null
+    needs_llm: true
+
+  - code: "2.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [GKS]
+    rule: "Họ tên + năm sinh bố/mẹ trên KS khớp CCCD bố/mẹ (nếu có)"
+    action: "Đối chiếu với CCCD bố/mẹ trong hồ sơ"
+    condition: null
+    needs_llm: true
+
+  - code: "2.3"
+    category: ho_tich
+    severity: warn
+    applies_to: [GKS]
+    rule: "Đối chiếu KS với CT07 + sổ đất + giấy liên quan"
+    action: "Ghi chú cụ thể + BÁO nếu mâu thuẫn"
+    condition: null
+    needs_llm: true
+
+  # === KẾT HÔN / LY HÔN ===
+  - code: "3.1"
+    category: ho_tich
+    severity: reject
+    applies_to: [GKH, Ly hon]
+    rule: "Họ tên + ngày sinh vợ/chồng trên ĐKKH khớp 100% CCCD + GKS"
+    action: "Báo lỗi nếu lệch"
+    condition: null
+    needs_llm: true
+
+  - code: "3.2"
+    category: ho_tich
+    severity: info
+    applies_to: [GKH]
+    rule: "Ghi nhớ ngày kết hôn — KHÔNG khai timeline công việc trùng vào ngày này"
+    action: "Lưu vào hồ sơ để đối chiếu khi lập timeline"
+    condition: null
+    needs_llm: true
+
+  - code: "3.3"
+    category: ho_tich
+    severity: warn
+    applies_to: [Ly hon]
+    rule: "Xin đủ thông tin vợ/chồng cũ: họ tên, DOB, ngày kết hôn, ngày ly hôn"
+    action: "Bổ sung thông tin nếu thiếu"
+    condition: null
+    needs_llm: true
+
+  # === CCCD ===
+  - code: "4.1"
+    category: ho_tich
+    severity: reject
+    applies_to: [CCCD]
+    rule: "Thông tin cá nhân trên CCCD khớp KS + HC"
+    action: "Báo lỗi nếu lệch"
+    condition: null
+    needs_llm: true
+
+  - code: "4.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [CCCD]
+    rule: "Scan đủ 2 mặt + ảnh rõ nét đọc được toàn bộ thông tin"
+    action: "Yêu cầu scan lại nếu thiếu mặt / mờ"
+    condition: null
+    needs_llm: true
+
+  - code: "4.3"
+    category: ho_tich
+    severity: warn
+    applies_to: [CCCD]
+    rule: "Mặt sau CCCD có đủ 2 ô dấu vân tay (ngón trỏ trái + phải)"
+    action: "BÁO nếu thiếu hoặc khách bị cụt ngón tay"
+    condition: null
+    needs_llm: true
+
+  # === CT07 ===
+  - code: "5.1"
+    category: ho_tich
+    severity: warn
+    applies_to: [XNCT]
+    rule: "CT07 ghi đủ TẤT CẢ thành viên đang sống cùng (vợ/chồng/con/cha/mẹ)"
+    action: "Yêu cầu xin lại + bổ sung đủ nếu thiếu thành viên"
+    condition: null
+    needs_llm: true
+
+  - code: "5.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [XNCT]
+    rule: "CT07 còn hiệu lực (ngày cấp gần ngày nộp visa)"
+    action: "Yêu cầu xin lại nếu giấy cũ quá"
+    condition: null
+    needs_llm: true
+
+  # === LLTP ===
+  - code: "6.1"
+    category: ho_tich
+    severity: reject
+    applies_to: [LLTP]
+    rule: "Thông tin cá nhân + bố/mẹ/vợ-chồng + địa chỉ trên LLTP khớp CCCD"
+    action: "Báo lỗi nếu lệch"
+    condition: null
+    needs_llm: true
+
+  - code: "6.2"
+    category: ho_tich
+    severity: reject
+    applies_to: [LLTP]
+    rule: "LLTP còn hạn ≤ 6 tháng tính từ ngày cấp đến ngày dự kiến nộp visa"
+    action: "Nhắc khách xin cấp lại nếu sắp hết hạn"
+    condition: "months_since(doc.extracted.ngay_cap) > 6"
+    needs_llm: false
+
+  - code: "6.3"
+    category: ho_tich
+    severity: reject
+    applies_to: [LLTP]
+    rule: "KHÔNG khai báo tạm trú nếu địa chỉ khác địa chỉ xác minh kinh nghiệm làm việc"
+    action: "BÁO NGAY nếu phát hiện đã khai sai"
+    condition: null
+    needs_llm: true
+
+  # === BẰNG LÁI / ẢNH THẺ ===
+  - code: "7.1"
+    category: ho_tich
+    severity: info
+    applies_to: [GPLX]
+    rule: "Thu thập đầy đủ loại bằng lái khách có (A1/A/B1/B2/C)"
+    action: "Lưu vào hồ sơ"
+    condition: null
+    needs_llm: true
+
+  - code: "8.1"
+    category: ho_tich
+    severity: warn
+    applies_to: [Anh the]
+    rule: "Ảnh thẻ chụp trong vòng 6 tháng gần nhất"
+    action: "Yêu cầu chụp lại nếu cũ hơn 6 tháng"
+    condition: null
+    needs_llm: true
+
+  - code: "8.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [Anh the]
+    rule: "Tiêu chuẩn ảnh: mặt mộc, không trang sức, áo thun giản dị, tóc tối màu, che xăm, phông trắng"
+    action: "Đánh dấu 'Cần kiểm tra' kèm tiêu chí không đạt"
+    condition: null
+    needs_llm: true
+
+  - code: "8.3"
+    category: ho_tich
+    severity: warn
+    applies_to: [Anh the]
+    rule: "Ảnh thẻ KHÔNG trùng ảnh trong HC/bằng lái nếu HC/bằng lái > 6 tháng"
+    action: "Yêu cầu ảnh mới"
+    condition: null
+    needs_llm: true
+
+  # === BẰNG CẤP ===
+  - code: "9.1"
+    category: ho_tich
+    severity: reject
+    applies_to: [Bang cap]
+    rule: "Họ tên + DOB trên bằng cấp khớp CCCD + KS"
+    action: "Báo lỗi nếu lệch"
+    condition: null
+    needs_llm: true
+
+  - code: "9.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [Bang cap]
+    rule: "Năm cấp bằng khớp mốc thời gian khách khai đã học"
+    action: "Hỏi lại khách mốc học từng cấp"
+    condition: null
+    needs_llm: true
+
+  - code: "9.3"
+    category: ho_tich
+    severity: warn
+    applies_to: [Bang cap]
+    rule: "Scan đủ 2 mặt cho cấp 3 / cấp 2 / trung cấp / cao đẳng / đại học"
+    action: "Yêu cầu bổ sung mặt còn thiếu"
+    condition: null
+    needs_llm: true
+
+  # === IOM ===
+  - code: "10.1"
+    category: ho_tich
+    severity: reject
+    applies_to: [IOM]
+    rule: "Thông tin passport trên giấy khám IOM khớp HC đã nộp"
+    action: "BÁO NGAY nếu sai — ảnh hưởng nghiêm trọng đến hồ sơ"
+    condition: null
+    needs_llm: true
+
+  - code: "10.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [IOM]
+    rule: "Giấy khám IOM còn hạn ≤ 12 tháng tính từ ngày khám đến ngày nộp visa"
+    action: "Đặt lịch khám lại tại IOM"
+    condition: "months_since(doc.extracted.ngay_cap) > 12"
+    needs_llm: false
+
+  # === THÔNG TIN CÁ NHÂN & GIA ĐÌNH ===
+  - code: "11.1"
+    category: ho_tich
+    severity: warn
+    applies_to: [CV]
+    rule: "Đương đơn khai đủ: tên/giới tính/DOB/nơi sinh/hôn nhân/địa chỉ qua thời gian/học tập/công tác/SĐT"
+    action: "Bổ sung trường còn thiếu"
+    condition: null
+    needs_llm: true
+
+  - code: "11.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [CV]
+    rule: "Khai đủ thông tin thành viên gia đình (cha/mẹ/vc/con/anh-chị-em)"
+    action: "Bổ sung thành viên còn thiếu"
+    condition: null
+    needs_llm: true
+
+  - code: "11.3"
+    category: ho_tich
+    severity: warn
+    applies_to: [CV]
+    rule: "Hỏi xem có ai trong gia đình DỰ ĐỊNH đi Canada làm nông tương lai không"
+    action: "BÁO NGAY nếu có"
+    condition: null
+    needs_llm: true
+
+  # === THẺ VISA/MC ===
+  - code: "12.1"
+    category: ho_tich
+    severity: reject
+    applies_to: [The Visa-MC]
+    rule: "Thẻ ngân hàng CẤM dùng: Ever-link Vietcombank, mọi loại Agribank, MB Hybrid. CHỈ dùng: Techcombank, MB Bank."
+    action: "Yêu cầu khách đổi thẻ ngay"
+    condition: "any_in_text(doc.summary, ['ever-link', 'everlink', 'agribank', 'mb hybrid'])"
+    needs_llm: false
+
+  - code: "12.2"
+    category: ho_tich
+    severity: warn
+    applies_to: [The Visa-MC]
+    rule: "Đủ thông tin: SĐT OTP, NH, số thẻ 16 số, tên chủ, hết hạn MM/YY, CVV, ảnh 2 mặt"
+    action: "Bổ sung trường thiếu"
+    condition: null
+    needs_llm: true
+
+  # === II. TÀI SẢN — SỔ ĐỎ ===
+  - code: "13.1"
+    category: tai_san
+    severity: warn
+    applies_to: [So dat]
+    rule: "Tên đứng sổ phải có quan hệ hợp lệ với đương đơn (đương đơn/vc/bm/ôb). Ông-bà cần thêm GKS bố/mẹ"
+    action: "Xin thêm giấy tờ chứng minh quan hệ"
+    condition: null
+    needs_llm: true
+
+  - code: "13.2"
+    category: tai_san
+    severity: warn
+    applies_to: [So dat]
+    rule: "Họ tên + năm sinh người đứng tên trên sổ khớp CCCD/KS của người đó"
+    action: "Báo lỗi nếu lệch"
+    condition: null
+    needs_llm: true
+
+  - code: "13.3"
+    category: tai_san
+    severity: reject
+    applies_to: [So dat]
+    rule: "Sổ đỏ đang thế chấp → KHÔNG DÙNG ĐƯỢC"
+    action: "Yêu cầu khách XOÁ THẾ CHẤP trước khi dùng"
+    condition: "doc.extracted.tinh_trang_the_chap == true"
+    needs_llm: false
+
+  - code: "13.4"
+    category: tai_san
+    severity: warn
+    applies_to: [So dat]
+    rule: "Sổ đỏ có ghi 'tờ bổ sung' → bắt buộc xin tờ bổ sung đó"
+    action: "Yêu cầu khách cung cấp tờ bổ sung ngay"
+    condition: "doc.extracted.co_to_bo_sung == true"
+    needs_llm: false
+
+  - code: "13.5"
+    category: tai_san
+    severity: warn
+    applies_to: [So dat]
+    rule: "Sổ đỏ có mã vạch đầy đủ + scan đủ các mặt"
+    action: "Yêu cầu scan lại nếu thiếu"
+    condition: null
+    needs_llm: true
+
+  # === HĐ CHO/TẶNG/THỪA KẾ ===
+  - code: "14.1"
+    category: tai_san
+    severity: reject
+    applies_to: [HD cho-tang-thua ke]
+    rule: "Người tặng/để thừa kế phải là người thân hợp lệ (cha mẹ/ông bà/vc/anh-chị-em)"
+    action: "BÁO ngay nếu không hợp lệ"
+    condition: null
+    needs_llm: true
+
+  - code: "14.2"
+    category: tai_san
+    severity: warn
+    applies_to: [HD cho-tang-thua ke]
+    rule: "Tài sản được tặng/thừa kế đã có giấy tờ đính kèm (sổ đất / cà vẹt…)"
+    action: "Yêu cầu bổ sung giấy tờ tài sản đính kèm"
+    condition: null
+    needs_llm: true
+
+  - code: "14.3"
+    category: tai_san
+    severity: reject
+    applies_to: [HD cho-tang-thua ke]
+    rule: "Hợp đồng / văn bản thừa kế phải có CÔNG CHỨNG hợp lệ"
+    action: "Yêu cầu bổ sung công chứng"
+    condition: "doc.extracted.co_cong_chung == false"
+    needs_llm: false
+
+  # === STK ===
+  - code: "15.1"
+    category: tai_san
+    severity: reject
+    applies_to: [STK]
+    rule: "STK đứng tên đương đơn + còn hạn + kỳ hạn ≥ 6 tháng"
+    action: "BÁO nếu không đạt"
+    condition: null
+    needs_llm: true
+
+  - code: "15.2"
+    category: tai_san
+    severity: warn
+    applies_to: [STK]
+    rule: "Số tiền nên KHÔNG tròn (vd 301/315/390tr thay vì 300/400tr)"
+    action: "Báo nếu là số tròn"
+    condition: null
+    needs_llm: true
+
+  - code: "15.3"
+    category: tai_san
+    severity: warn
+    applies_to: [STK]
+    rule: "Địa chỉ trên STK khớp địa chỉ thường trú / cư trú đã khai"
+    action: "Báo lỗi nếu lệch"
+    condition: null
+    needs_llm: true
+
+  - code: "16.1"
+    category: tai_san
+    severity: warn
+    applies_to: [XN so du]
+    rule: "Xác nhận số dư phải EN hoặc song ngữ Việt-Anh + ghi giá trị quy đổi USD"
+    action: "Yêu cầu xin bản EN"
+    condition: null
+    needs_llm: true
+
+  # === CÀ VẸT XE ===
+  - code: "17.1"
+    category: tai_san
+    severity: warn
+    applies_to: [Ca vet xe]
+    rule: "Cà vẹt xe đứng tên đương đơn / vợ/chồng / bố/mẹ"
+    action: "Hỏi lại quan hệ nếu đứng tên người khác + BÁO"
+    condition: null
+    needs_llm: true
+
+  - code: "17.2"
+    category: tai_san
+    severity: warn
+    applies_to: [Ca vet xe]
+    rule: "Nơi đăng ký xe trên cà vẹt khớp địa chỉ thường trú của khách"
+    action: "BÁO nếu không khớp"
+    condition: null
+    needs_llm: true
+
+  # === VÀNG ===
+  - code: "18.1"
+    category: tai_san
+    severity: warn
+    applies_to: [Vang]
+    rule: "Trên hoá đơn vàng phải có tên người mua = đương đơn (chủ tiệm viết tay tên + SĐT/CCCD nếu mẫu không có)"
+    action: "Yêu cầu chủ tiệm bổ sung tên + SĐT/CCCD"
+    condition: null
+    needs_llm: true
+
+  - code: "18.2"
+    category: tai_san
+    severity: warn
+    applies_to: [Vang]
+    rule: "Nên có 3-4 hoá đơn vàng, mỗi lần 2-3 chỉ, cách xa nhau về thời gian"
+    action: "Báo nếu chỉ 1 lần mua giá trị lớn"
+    condition: null
+    needs_llm: true
+
+  - code: "18.3"
+    category: tai_san
+    severity: info
+    applies_to: [Vang]
+    rule: "Hoá đơn có mộc đỏ của tiệm vàng → càng tốt"
+    action: "Khuyến khích bổ sung mộc"
+    condition: null
+    needs_llm: true
+
+  # === III. CÔNG VIỆC — SỔ ĐẤT NN ===
+  - code: "19.1"
+    category: cong_viec
+    severity: warn
+    applies_to: [So dat NN]
+    rule: "Diện tích đất nông nghiệp đủ yêu cầu để khai hồ sơ công việc"
+    action: "Bổ sung sổ khác nếu chưa đủ diện tích"
+    condition: null
+    needs_llm: true
+
+  - code: "19.3"
+    category: cong_viec
+    severity: reject
+    applies_to: [So dat NN]
+    rule: "Đất nông nghiệp còn trong thời hạn sử dụng"
+    action: "BÁO NGAY nếu đã hết hạn"
+    condition: null
+    needs_llm: true
+
+  - code: "19.4"
+    category: cong_viec
+    severity: reject
+    applies_to: [So dat NN]
+    rule: "Sổ đất NN phải được cấp TRƯỚC ≥ 1 NĂM tính từ thời điểm khai hồ sơ công việc"
+    action: "KHÔNG DÙNG để khai kinh nghiệm làm nông nếu sổ cấp chưa đủ 1 năm"
+    condition: "years_since(doc.extracted.ngay_cap) < 1"
+    needs_llm: false
+
+  - code: "19.5"
+    category: cong_viec
+    severity: warn
+    applies_to: [So dat NN]
+    rule: "Địa chỉ thửa đất NN gần nơi khách sống (≤ 30 phút di chuyển)"
+    action: "BÁO xem xét phương án khác nếu quá xa"
+    condition: null
+    needs_llm: true
+
+  - code: "19.6"
+    category: cong_viec
+    severity: reject
+    applies_to: [So dat NN]
+    rule: "Sổ đất NN đang thế chấp → KHÔNG DÙNG ĐƯỢC"
+    action: "Yêu cầu xoá thế chấp"
+    condition: "doc.extracted.tinh_trang_the_chap == true"
+    needs_llm: false
+
+  - code: "19.7"
+    category: cong_viec
+    severity: warn
+    applies_to: [So dat NN]
+    rule: "Sổ đất NN có tờ bổ sung → bắt buộc xin tờ bổ sung"
+    action: "Yêu cầu khách cung cấp tờ bổ sung"
+    condition: "doc.extracted.co_to_bo_sung == true"
+    needs_llm: false
+
+  # === BHXH / BHYT ===
+  - code: "20.4"
+    category: cong_viec
+    severity: warn
+    applies_to: [BHXH, BHYT]
+    rule: "Chữ ký khách trên biên lai BHXH/BHYT khớp chữ ký trong HC + hồ sơ khác"
+    action: "Đối chiếu chữ ký xuyên hồ sơ"
+    condition: null
+    needs_llm: true
+
+  - code: "20.5"
+    category: cong_viec
+    severity: info
+    applies_to: [BHXH, BHYT]
+    rule: "Tiếp tục duy trì đóng BHXH/BHYT định kỳ 3 tháng/lần đến khi có kết quả visa"
+    action: "Reminder cho staff thông báo với khách"
+    condition: null
+    needs_llm: true
+
+  # === ĐẠI LÝ NÔNG SẢN ===
+  - code: "21.1"
+    category: cong_viec
+    severity: warn
+    applies_to: [Dai ly NS]
+    rule: "Mỗi đại lý cần đủ: họ tên chủ + địa chỉ chi tiết + CCCD (2 mặt) + SĐT + danh thiếp"
+    action: "Bổ sung thông tin còn thiếu"
+    condition: null
+    needs_llm: true
+
+  - code: "21.2"
+    category: cong_viec
+    severity: warn
+    applies_to: [Dai ly NS]
+    rule: "Đại lý có biển hiệu/mộc đỏ/danh thiếp + sẵn sàng xác minh khi LSQ Canada gọi"
+    action: "Người xác nhận phải nắm rõ nội dung thư giới thiệu"
+    condition: null
+    needs_llm: true
+
+  # === ẢNH/VIDEO LÀM NÔNG ===
+  - code: "22.1"
+    category: cong_viec
+    severity: warn
+    applies_to: [Anh-video lam nong]
+    rule: "Ảnh/video phải thể hiện đương đơn đang thực sự làm nông; loại cây + địa điểm khớp sổ đỏ NN"
+    action: "Yêu cầu bổ sung ảnh/video đúng loại cây + địa điểm"
+    condition: null
+    needs_llm: true
