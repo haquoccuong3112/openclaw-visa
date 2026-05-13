@@ -1,0 +1,45 @@
+# ============================================================================
+# Quan hệ nhân thân — extract_relation() trong lib/sop_naming.py dùng để gắn
+# vào tên file (vd "CCCD bo-Nguyen Van A.pdf"). Phase 5 data-driven.
+# ============================================================================
+# Mỗi entry:
+#   relation: SOP slug (dùng trong filename) — KHÔNG dấu, viết thường
+#   label:    nhãn tiếng Việt (cho documentation, future report)
+#   triggers: list từ khoá (đã strip diacritics + lower) — xuất hiện trong
+#             summary OCR → khả năng giấy là của người thuộc relation đó
+# ============================================================================
+
+schema_version: 1
+
+relations:
+  - relation: ba
+    label: "bố / cha"
+    triggers: ["cha", "bo ", "bo,", "bo.", " bo", "ong bo", "ba ruot"]
+
+  - relation: me
+    label: "mẹ"
+    triggers: ["me ", "me,", "me.", " me", "ba me", "me ruot"]
+
+  - relation: vo
+    label: "vợ"
+    triggers: ["vo ", "vo,", "vo.", " vo", "ba xa"]
+
+  - relation: chong
+    label: "chồng"
+    triggers: ["chong"]
+
+  - relation: con
+    label: "con (trai/gái)"
+    triggers: ["con trai", "con gai", "con ruot", " con "]
+
+  - relation: ong ba
+    label: "ông/bà (nội/ngoại)"
+    triggers: ["ong ba", "ong noi", "ba noi", "ong ngoai", "ba ngoai"]
+
+  - relation: anh chi em
+    label: "anh / chị / em ruột"
+    triggers: ["anh ruot", "chi ruot", "em ruot", "anh trai", "chi gai"]
+
+  - relation: co di chu bac
+    label: "cô / dì / chú / bác"
+    triggers: ["co ruot", "di ruot", "chu ruot", "bac ruot"]

@@ -180,7 +180,17 @@ def gemini_classify_file(path: Path, filename: str, model: str | None = None) ->
         return {"doc_type": "", "person": [], "summary_vi": "(no OPENROUTER_API_KEY)", "key_fields": {}, "extracted": {}}
     mime = OCR_EXT_MIME.get(path.suffix.lower(), "application/pdf")
     content_b64 = base64.b64encode(path.read_bytes()).decode()
+    # Inject doc type catalog từ data/doc_types.yaml (Phase 5 data-driven).
+    # Helps LLM thấy description đầy đủ của mỗi loại, không chỉ tag name hardcoded.
+    try:
+        from lib.rule_loader import generate_doc_type_catalog
+        _doc_catalog = generate_doc_type_catalog()
+    except Exception:  # noqa: BLE001 — graceful: nếu YAML lỗi thì dùng prompt cũ không catalog
+        _doc_catalog = ""
     prompt = f"""Đọc trực tiếp file hồ sơ visa Canada đính kèm và trả về JSON MỘT DÒNG, THUẦN (không markdown, không giải thích ngoài JSON).
+
+# DANH MỤC LOẠI GIẤY TỜ BOT NHẬN DIỆN (tham khảo — `doc_type` nên match TÊN tiếng Việt 1 trong các loại bên dưới):
+{_doc_catalog or "(catalog không load được)"}
 
 Các trường:
 - doc_type: loại giấy tờ tiếng Việt — PHÂN LOẠI THEO BẢN CHẤT GIẤY TỜ, KHÔNG theo các trường/thông tin mà nó nhắc tới.

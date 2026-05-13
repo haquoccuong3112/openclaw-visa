@@ -65,17 +65,19 @@ def title_case_ascii(s: str) -> str:
 # ============================================================
 # 3. Relation extraction (SOP §10.4)
 # ============================================================
-RELATION_MAP = {
-    # canonical: list of triggers (already diacritic-stripped, lowered)
-    "ba": ["cha", "bo ", "bo,", "bo.", " bo", "ong bo", "ba ruot"],  # cha
-    "me": ["me ", "me,", "me.", " me", "ba me", "me ruot"],
-    "vo": ["vo ", "vo,", "vo.", " vo", "ba xa"],
-    "chong": ["chong"],
-    "con": ["con trai", "con gai", "con ruot", " con "],
-    "ong ba": ["ong ba", "ong noi", "ba noi", "ong ngoai", "ba ngoai"],
-    "anh chi em": ["anh ruot", "chi ruot", "em ruot", "anh trai", "chi gai"],
-    "co di chu bac": ["co ruot", "di ruot", "chu ruot", "bac ruot"],
-}
+# RELATION_MAP — load từ data/relations.yaml (Phase 5 data-driven).
+# Cấu trúc cũ giữ (backward compat): dict[relation_slug, list[trigger_words]].
+def _load_relation_map_from_yaml() -> dict[str, list[str]]:
+    try:
+        from .rule_loader import load_relations
+    except ImportError:
+        from rule_loader import load_relations  # type: ignore  # noqa
+    out: dict[str, list[str]] = {}
+    for rel in load_relations():
+        out[rel.relation] = list(rel.triggers)
+    return out
+
+RELATION_MAP = _load_relation_map_from_yaml()
 
 
 def extract_relation(applicant: str, subject: str, summary: str = "") -> Optional[str]:

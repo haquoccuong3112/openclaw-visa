@@ -44,6 +44,14 @@ class ChecklistItem:
 
 
 @dataclass(frozen=True)
+class Relation:
+    """1 quan hệ nhân thân (vd bo/me/vo/chong/con) + danh sách trigger words."""
+    relation: str             # SOP slug ASCII (dùng trong filename)
+    label: str                # Nhãn tiếng Việt
+    triggers: tuple[str, ...] # Từ khoá đã strip diacritics + lower
+
+
+@dataclass(frozen=True)
 class DocType:
     """1 loại giấy tờ bot phân loại (vd CCCD, So dat, Sao ke)."""
     tag: str                       # SOP tag — dùng trong filename
@@ -208,6 +216,38 @@ def load_doc_types() -> tuple[DocType, ...]:
     return tuple(out)
 
 
+@lru_cache(maxsize=1)
+def load_relations() -> tuple[Relation, ...]:
+    """Trả tuple Relation từ relations.yaml (Phase 5 data-driven)."""
+    if not RELATIONS_YAML.exists():
+        return tuple()
+    data = _load_yaml(RELATIONS_YAML)
+    raw = data.get("relations") or []
+    if not isinstance(raw, list):
+        raise ValueError("relations.yaml: 'relations' phải là list")
+    out: list[Relation] = []
+    seen: set[str] = set()
+    for i, r in enumerate(raw, 1):
+        if not isinstance(r, dict):
+            raise ValueError(f"relations.yaml[{i}]: phải là dict")
+        try:
+            rel = str(r["relation"]).strip()
+            label = str(r.get("label", "")).strip()
+            triggers = r["triggers"]
+        except KeyError as e:
+            raise ValueError(f"relations.yaml[{i}]: thiếu field {e}") from e
+        if rel in seen:
+            raise ValueError(f"relations.yaml[{i}]: relation '{rel}' bị trùng")
+        seen.add(rel)
+        if not isinstance(triggers, list) or not all(isinstance(t, str) for t in triggers):
+            raise ValueError(f"relations.yaml[{i}] relation={rel}: triggers phải list[str]")
+        out.append(Relation(
+            relation=rel, label=label,
+            triggers=tuple(t for t in triggers),
+        ))
+    return tuple(out)
+
+
 _CAT_LABEL = {
     "ho_tich": "I. HỒ TỊCH",
     "tai_san": "II. TÀI SẢN",
@@ -217,6 +257,26 @@ _CAT_LABEL = {
 }
 
 _SEV_ICON = {"reject": "🔴", "warn": "🟡", "info": "🟢"}
+
+
+def generate_doc_type_catalog(doc_types: tuple[DocType, ...] | None = None) -> str:
+    """Sinh catalog doc types compact cho Gemini OCR prompt (Phase 5 data-driven).
+
+    Format: mỗi loại 1 dòng `- "Tên hiển thị": description` — LLM thấy được
+    full description thay vì chỉ tên trong hardcoded prompt. Improve classify
+    accuracy ~5-10% theo audit.
+    """
+    doc_types = doc_types or load_doc_types()
+    if not doc_types:
+        return ""
+    lines: list[str] = []
+    for dt in doc_types:
+        # Bỏ qua doc_type không có description (entry tối thiểu)
+        if not dt.description:
+            continue
+        # Dùng tag làm "tên hiển thị tiếng Anh-ASCII"; description tiếng Việt chi tiết
+        lines.append(f'- "{dt.tag}" ({dt.folder}): {dt.description}')
+    return "\n".join(lines)
 
 
 def generate_rules_block(rules: tuple[ValidationRule, ...] | None = None) -> str:
