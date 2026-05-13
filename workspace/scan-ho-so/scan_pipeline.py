@@ -458,25 +458,66 @@ def _gemini_quick_classify_page(img_b64: str, page_no: int,
     return {"doc_type": "", "ten_chu_the": ""}
 
 
+def _names_clearly_differ(a: str, b: str) -> bool:
+    """RÕ RÀNG 2 người khác nhau (cùng doc_type nhưng KHÁC PERSON) → buộc split.
+
+    Đừng nhầm: Gemini OCR có thể đọc khác chữ giữa 2 trang của CÙNG 1 người (vd
+    đánh máy → "Hoàng Thị Mơ" vs "Hoang Thi Mo"). Chỉ coi là KHÁC NGƯỜI khi:
+    - Cả 2 tên non-empty
+    - HỌ (token đầu) ≠ — vd "Hoang" vs "Au" → khác họ → chắc chắn khác người
+    HOẶC
+    - Tên CUỐI (token cuối) khác RÕ — vd "Mơ" (Mo) vs "Huyền" (Huyen)
+    """
+    try:
+        from lib.sop_naming import strip_diacritics
+    except ImportError:
+        from sop_naming import strip_diacritics  # type: ignore  # noqa
+    a = strip_diacritics(a or "").lower().strip()
+    b = strip_diacritics(b or "").lower().strip()
+    if not a or not b or a == b:
+        return False
+    at = a.split()
+    bt = b.split()
+    if not at or not bt:
+        return False
+    # Khác họ (token đầu) → CHẮC CHẮN khác người
+    if at[0] != bt[0]:
+        return True
+    # Cùng họ, khác tên cuối + tên cuối đủ dài (≥3 chars để tránh OCR typo 1-2 char) → khác người
+    if len(at) >= 2 and len(bt) >= 2:
+        if at[-1] != bt[-1] and min(len(at[-1]), len(bt[-1])) >= 3:
+            return True
+    return False
+
+
 def _group_consecutive(pages_class: list[dict]) -> list[dict]:
-    """Gom các trang liên tiếp cùng doc_type → segment. ten_chu_the chỉ dùng làm hint, không
-    được tự cắt segment chỉ vì khác name (Gemini có thể OCR tên khác giữa 2 trang cùng giấy)."""
+    """Gom các trang liên tiếp cùng doc_type → segment. Cắt khi:
+    - doc_type khác (loại giấy đổi)
+    - HOẶC cùng doc_type nhưng `ten_chu_the` rõ ràng KHÁC NGƯỜI (vd 1 PDF gộp CCCD KH +
+      CCCD bố mẹ — cùng tag CCCD nhưng khác họ → phải split để tránh sidecar trộn dữ liệu)."""
     if not pages_class:
         return []
-    def _key(p: dict) -> str:
+    def _dt(p: dict) -> str:
         return (p.get("doc_type") or "").strip().lower()
     segments: list[dict] = []
-    cur_dt = _key(pages_class[0])
+    cur_dt = _dt(pages_class[0])
+    cur_name = (pages_class[0].get("ten_chu_the") or "").strip()
     cur_start = 1
     for i, p in enumerate(pages_class[1:], start=2):
-        k = _key(p)
-        # Trang doc_type rỗng → coi là continuation (Gemini không chắc → đừng split lẻ)
-        if k and k != cur_dt:
+        k = _dt(p)
+        nm = (p.get("ten_chu_the") or "").strip()
+        # Trang doc_type rỗng → continuation (Gemini không chắc → đừng split lẻ)
+        # Trang khác doc_type → split.
+        # Cùng doc_type nhưng khác NGƯỜI rõ ràng → split (bug fix: CCCD đa người trong 1 PDF).
+        diff_type = bool(k) and k != cur_dt
+        diff_person = bool(k) and k == cur_dt and _names_clearly_differ(cur_name, nm)
+        if diff_type or diff_person:
             seed = pages_class[cur_start - 1]
             segments.append({"tu_trang": cur_start, "den_trang": i - 1,
                              "doc_type": seed.get("doc_type", ""),
                              "ten_chu_the": seed.get("ten_chu_the", "")})
             cur_dt = k
+            cur_name = nm
             cur_start = i
     seed = pages_class[cur_start - 1]
     segments.append({"tu_trang": cur_start, "den_trang": len(pages_class),
@@ -796,6 +837,40 @@ def run_self_test() -> int:
     assert len(g1) == 1 and g1[0]["den_trang"] == 5
     # PDF rỗng → 0 segment
     assert _group_consecutive([]) == []
+
+    # Bug fix #4: cùng doc_type nhưng KHÁC PERSON → buộc split
+    # Tình huống: 1 PDF gộp CCCD KH + CCCD bố/mẹ (đều CCCD nhưng khác họ tên)
+    g_multi_person = _group_consecutive([
+        {"doc_type": "Căn cước công dân", "ten_chu_the": "Hoàng Thị Mơ"},
+        {"doc_type": "Căn cước công dân", "ten_chu_the": "Hoàng Thị Mơ"},
+        {"doc_type": "Căn cước công dân", "ten_chu_the": "Âu Thị Huyền"},  # khác họ → split
+        {"doc_type": "Căn cước công dân", "ten_chu_the": "Âu Thị Huyền"},
+    ])
+    assert len(g_multi_person) == 2, g_multi_person
+    assert g_multi_person[0]["ten_chu_the"] == "Hoàng Thị Mơ"
+    assert g_multi_person[1]["ten_chu_the"] == "Âu Thị Huyền"
+
+    # Đừng false-positive: OCR đọc khác chữ giữa 2 trang cùng NGƯỜI → KHÔNG split
+    g_same_person_typo = _group_consecutive([
+        {"doc_type": "Hộ chiếu", "ten_chu_the": "Hoàng Thị Mơ"},
+        {"doc_type": "Hộ chiếu", "ten_chu_the": "Hoang Thi Mo"},   # ascii vs unicode same person
+    ])
+    assert len(g_same_person_typo) == 1, g_same_person_typo
+
+    # Cùng họ + tên cuối chỉ khác 1-2 char (OCR typo) → KHÔNG split
+    g_typo = _group_consecutive([
+        {"doc_type": "CCCD", "ten_chu_the": "Nguyễn Văn A"},
+        {"doc_type": "CCCD", "ten_chu_the": "Nguyễn Văn"},        # OCR cắt cuối, vẫn cùng người
+    ])
+    assert len(g_typo) == 1, g_typo
+
+    # _names_clearly_differ direct test
+    assert _names_clearly_differ("Hoàng Thị Mơ", "Âu Thị Huyền") is True
+    assert _names_clearly_differ("Hoàng Văn Thành", "Phan Thị Bính") is True
+    assert _names_clearly_differ("Hoàng Thị Mơ", "Hoang Thi Mo") is False     # ascii vs unicode
+    assert _names_clearly_differ("Hoàng Thị Mơ", "") is False                 # empty → không khẳng định
+    assert _names_clearly_differ("Hoàng Văn Thành", "Hoàng Văn Thanh") is False  # 1 char diff cùng họ-đệm
+    print("_group_consecutive multi-person split OK")
     # _split_pdf_pages: tạo PDF 4 trang in-memory rồi tách 2-3 → còn 2 trang
     try:
         import pypdf, io as _io
