@@ -1,0 +1,68 @@
+# ============================================================================
+# Golden test case — Nguyễn Văn A (synthetic, không phải KH thật)
+# ============================================================================
+# Mock profile (dataset thô từ build_dataset()) + danh sách rule code KỲ VỌNG
+# bot detect được qua deterministic rule_engine (KHÔNG cần gọi LLM).
+#
+# Hồ sơ này CỐ TÌNH có 4 lỗi rõ ràng:
+#   - 13.3: Sổ đỏ thế chấp (tinh_trang_the_chap=true)
+#   - 19.6: Sổ đất NN thế chấp
+#   - 6.2:  LLTP cấp >6 tháng trước → hết hạn
+#   - 12.1: Thẻ NH Ever-link Vietcombank (cấm)
+#
+# Plus 1 hồ sơ sạch để verify rule KHÔNG fire sai.
+# ============================================================================
+
+applicant: "Nguyễn Văn A (test)"
+today: "13/05/2026"
+
+dataset:
+  # Sổ đỏ đang thế chấp → rule 13.3 fire
+  - ten: "So dat-Nguyen Van A.pdf"
+    loai: "So dat"
+    du_lieu:
+      chu_su_dung: "Nguyễn Văn A"
+      dia_chi: "thửa 123, xã X, huyện Y"
+      tinh_trang_the_chap: true   # ← lỗi 13.3
+
+  # Sổ đất NN đang thế chấp → rule 19.6 fire
+  - ten: "So dat NN-Nguyen Van A.pdf"
+    loai: "So dat NN"
+    du_lieu:
+      chu_su_dung: "Nguyễn Văn A"
+      dien_tich: "200 m2"
+      ngay_cap: "01/01/2020"
+      tinh_trang_the_chap: true   # ← lỗi 19.6
+
+  # LLTP cấp >6 tháng → rule 6.2 fire (hết hạn)
+  - ten: "LLTP-Nguyen Van A.pdf"
+    loai: "LLTP"
+    du_lieu:
+      ho_ten: "Nguyễn Văn A"
+      ngay_cap: "01/01/2025"    # ← cấp 16 tháng trước (today=2026-05-13) → quá 6 tháng
+
+  # Thẻ ngân hàng Ever-link Vietcombank → rule 12.1 fire
+  - ten: "The Visa-Nguyen Van A.jpg"
+    loai: "The Visa-MC"
+    tom_tat: "thẻ ATM Ever-Link của Vietcombank số 12345..."
+    du_lieu:
+      chu_the: "Nguyễn Văn A"
+
+  # CCCD sạch → KHÔNG có rule fire
+  - ten: "CCCD-Nguyen Van A.pdf"
+    loai: "CCCD"
+    du_lieu:
+      ho_ten: "Nguyễn Văn A"
+      so_giay_to: "012345678901"
+      ngay_cap: "15/03/2021"
+
+# Rule code bot PHẢI detect được (deterministic — không qua LLM)
+expected_errors:
+  - "13.3"      # Sổ đỏ thế chấp
+  - "19.6"      # Sổ đất NN thế chấp
+  - "6.2"       # LLTP hết hạn
+  - "12.1"      # NH cấm
+
+# Rule code bot KHÔNG được fire (false positive guard)
+forbidden_errors:
+  - "19.4"      # 19.4 = sổ đất NN cấp <1 năm — ở đây ngay_cap=01/01/2020 đã 6+ năm → KHÔNG fire

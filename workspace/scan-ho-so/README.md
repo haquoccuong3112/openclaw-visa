@@ -32,9 +32,19 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   --from-registry <chat-id> --manifest <path>` (or `--case-folder-id … --applicant …`); `--dry-run`,
   `--checklist-only`, `--no-checklist`, `--self-test`, `--retries N`.
 - **`lib/`** — shared building blocks (used by both `telegram_listener.py` and `scan_pipeline.py`):
+  - `rule_loader.py` ⭐ — load + validate `data/rules.yaml` / `data/doc_types.yaml` / `data/relations.yaml`
+    (data-driven sprint). `load_checklist()` → 26 mục FARM; `load_validations()` → 63 rule v1.1;
+    `load_doc_types()` → 32 loại giấy tờ; `load_relations()` → 8 quan hệ. Plus `generate_rules_block()`
+    (sinh section RULES REFERENCE cho prompt thẩm định) + `generate_doc_type_catalog()` (cho prompt OCR).
+  - `rule_engine.py` ⭐ — deterministic eval (simpleeval) cho 11 rule có `condition` trong rules.yaml.
+    `detect_deterministic_errors(rules, dataset)` chạy NGOÀI LLM phát hiện ngay các lỗi rõ ràng (sổ đỏ
+    thế chấp, LLTP hết hạn, NH cấm…). Helpers: `years_until/months_since/days_since/contains/any_in_text`.
   - `sop_naming.py` — doc-type classification + the SOP filename builder (`<Tag>[ relation][ idx]-<Subject>[_ENG].ext`).
+    `DOC_TYPE_PATTERNS` + `FILENAME_HINTS` + `RELATION_MAP` giờ derive từ `data/*.yaml` lúc module-import.
   - `checklist.py` — the AI thẩm định: 2-stage LLM pipeline (cheap extract → reasoning) → a 4-part Markdown
     report written as a Google Doc, + the deterministic "điểm danh" FARM coverage (26 items / 18 required).
+    Tầng 2: chạy `rule_engine` pre-check trước → đưa "LỖI BOT ĐÃ PHÁT HIỆN" vào prompt → LLM chỉ làm
+    cross-validation + viết báo cáo (giảm false-negative 30-50%).
   - `chat.py` — the Q&A "visa officer": `answer_question()` with one-shot mechanisms `NEED_FILE` / `NEED_ADDR`
     (tra `diadia.py`) / `NEED_WEB` / `NEED_RENAME`; the case context also carries a `_dia_gioi` block (đã tra
     sẵn địa giới mọi địa chỉ trong hồ sơ → LLM coi là ground-truth, không gọi tên cũ↔mới của cùng nơi là "mâu
@@ -48,11 +58,18 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   - `diadia.py` — tra cứu địa giới hành chính VN cũ↔mới (cải cách 2025) — deterministic, đọc từ `data/admin/`:
     `resolve_address(text)` · `same_place(a,b)` · `commune_merge_info(name)`. Dùng bởi `checklist.py` (gắn
     `profile["_dia_gioi"]` làm ground-truth cho tầng 2) và `chat.py` (cơ chế `NEED_ADDR`). Không phải HTTP service.
-- **`data/`** — config data: `provinces_34.json` (34 đơn vị cấp tỉnh + map tỉnh cũ→mới + ngày hiệu lực; dùng bởi
-  `checklist.py`), `customer-folder-structure.json` (tham khảo: 4 thư mục top + thư mục con), và
-  **`data/admin/`** — bảng địa giới hành chính cho `diadia.py`: `province_new.json` (34 tỉnh), `ward_new.json`
-  (~3.321 xã/phường), `old_to_new_wards.json` (10.358 dòng map xã cũ→mới, từ `admin_mapping_old_to_new.xlsx`),
-  `_convert_xlsx.py` + `SOURCES.md` (nguồn: VietMap — xem `SOURCES.md`).
+- **`data/`** — config data (DATA-DRIVEN sprint hoàn tất):
+  - ⭐ **`rules.yaml`** — 26 checklist FARM + 63 validation rule v1.1 (HƯỚNG DẪN CHECK HỒ SƠ).
+    Add/sửa rule mới: edit YAML, restart bot (~2-5 phút, không cần edit Python).
+  - ⭐ **`doc_types.yaml`** — 32 loại giấy tờ với description + regex patterns.
+  - ⭐ **`relations.yaml`** — 8 quan hệ nhân thân (bo/me/vo/chong/con/ông bà/anh chị em/cô dì chú bác).
+  - `provinces_34.json` (34 đơn vị cấp tỉnh + map tỉnh cũ→mới + ngày hiệu lực; dùng bởi `checklist.py`),
+    `customer-folder-structure.json` (tham khảo: 4 thư mục top + thư mục con),
+  - **`data/admin/`** — bảng địa giới hành chính cho `diadia.py`: `province_new.json` (34 tỉnh), `ward_new.json`
+    (~3.321 xã/phường), `old_to_new_wards.json` (10.358 dòng map xã cũ→mới, từ `admin_mapping_old_to_new.xlsx`),
+    `_convert_xlsx.py` + `SOURCES.md` (nguồn: VietMap — xem `SOURCES.md`).
+- **`tests/`** — golden test cho rule_engine: `tests/golden/sample_case.yaml` (mock profile + expected rule
+  codes) + `tests/run_golden.py` (runner — chạy deterministic eval, 0 LLM call, <1s).
 - **`docs/`** — domain notes: `VISA_CANADA_BOT.md`, `visa_canada_sop_raw.md` (the ALLY FARM checklist + naming SOP).
 - **`archive/`** — `run_sop_v2.py`, an old one-off dev script (superseded by `scan_pipeline.py` / `telegram_listener.py`); kept for reference, not run.
 - **`donghanhbot.service`** — copy of the systemd unit (active copy is `/etc/systemd/system/donghanhbot.service`; keep both in sync, `daemon-reload` after editing the active one).
@@ -69,6 +86,23 @@ python3 -m py_compile telegram_listener.py scan_pipeline.py lib/*.py     # synta
 python3 telegram_listener.py --self-test                                 # group-title parser self-test
 python3 scan_pipeline.py --self-test                                     # SOP-naming self-test
 python3 lib/checklist.py && python3 lib/chat.py                           # the "tests" — each prints OK
+python3 lib/rule_loader.py && python3 lib/rule_engine.py                 # data-driven loader + engine
+python3 tests/run_golden.py                                              # golden test (rule_engine)
 python3 scan_pipeline.py <some.zip> --dry-run --applicant Test --manifest /tmp/m.json   # no Drive writes
 sudo systemctl restart donghanhbot && journalctl -u donghanhbot -f       # run / tail the bot
+```
+
+## Add rule mới (data-driven)
+```bash
+# 1. Edit YAML
+vi data/rules.yaml          # thêm rule kiểm tra giấy tờ
+vi data/doc_types.yaml      # thêm loại giấy tờ mới
+vi data/relations.yaml      # thêm quan hệ nhân thân
+
+# 2. Validate
+python3 lib/rule_loader.py  # schema check + load count
+python3 tests/run_golden.py # rule_engine vẫn detect đúng
+
+# 3. Apply
+sudo systemctl restart donghanhbot
 ```

@@ -143,7 +143,12 @@ to keep cost down:
   a **free-text Markdown report** (4 parts: BÁO CÁO THẨM ĐỊNH · ✅ PHẦN 1 chuẩn xác · ⏰ PHẦN 2
   sắp/đã hết hạn · ⚠️ PHẦN 3 điểm mâu thuẫn cần làm rõ · 📌 PHẦN 4 tóm tắt & khuyến nghị), written
   like a human reviewer. (`evaluate_profile_logic()`.) If Stage 1 fails, Stage 2 falls back to the
-  raw trimmed dataset — the pipeline never breaks.
+  raw trimmed dataset — the pipeline never breaks. **Data-driven (Phase 6 sprint)**: 26 mục FARM
+  + 63 rule kiểm tra v1.1 (HC/CCCD/LLTP/sổ đỏ thế chấp/sổ đất NN cấp <1 năm/NH cấm…) ở
+  `data/rules.yaml`; bot chạy `lib/rule_engine.py` **deterministic pre-check** 11 rule có condition
+  TRƯỚC khi gọi LLM (thế chấp/hết hạn/NH cấm…) — kết quả đưa vào prompt section "⚠️ LỖI BOT ĐÃ
+  PHÁT HIỆN" để LLM tin tưởng đưa vào báo cáo PHẦN 3 với mã code `[13.3]`/`[19.4]`. Add rule mới:
+  edit YAML, restart bot — không cần code Python.
 - Creates / overwrites a **Google Doc** `Bao cao tham dinh - <Applicant>` at the **root of the
   case folder** (the Markdown is converted to a real Google Doc; an appendix is appended: the
   **"Điểm danh hồ sơ theo CHECKLIST FARM"** table — all 26 FARM items with status `✅ đã có / ❌ THIẾU /
