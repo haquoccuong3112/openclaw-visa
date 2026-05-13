@@ -21,7 +21,7 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   rename / Drive-upload / thẩm-định stay sequential. Default OCR model `gemini-2.5-flash` (env `GEMINI_MODEL`)
   với `response_format: json_schema` (strict); 3-tier fallback `json_schema → json_object → off` cho model
   chưa hỗ trợ. **Multi-page PDF nhiều loại giấy tờ** đi qua flow 2-pass: Pass 1 — rasterize từng trang
-  (`pypdfium2`) → `gemini-2.5-flash-lite` quick-classify per page (env `PAGE_CLASSIFY_MODEL`); group trang
+  (`pypdfium2`) → `gemini-2.5-flash` quick-classify per page (env `PAGE_CLASSIFY_MODEL`); group trang
   liên tiếp cùng loại → segment. Pass 2 — split PDF (`pypdf`) + OCR đầy đủ per segment, mỗi segment thành
   1 file riêng (status `uploaded-split`). File `confidence=low + tag=Khac` → escalate `gemini-2.5-pro` 1 call
   để cứu. File đã có hash SHA-1 trong sidecar → status `duplicate-by-hash` (skip upload, KH gửi lại không

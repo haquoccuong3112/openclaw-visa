@@ -339,11 +339,11 @@ def dedup_name(name_registry: dict, tag: str, subject_title: str, ext: str,
 
 # ============================================================================
 # Fix 5 — Page-by-page 2-pass OCR cho multi-page PDF (multi-doc).
-# Pass 1: rasterize từng trang → flash-lite classify (cheap, chỉ doc_type + ten_chu_the).
+# Pass 1: rasterize từng trang → flash classify (cheap, chỉ doc_type + ten_chu_the).
 # Group: trang liên tiếp cùng (doc_type, ten_chu_the) → segment.
 # Pass 2: split PDF + full OCR per segment (do caller chạy qua process_one).
 # ============================================================================
-PAGE_CLASSIFY_MODEL = os.environ.get("PAGE_CLASSIFY_MODEL", "google/gemini-2.5-flash-lite")
+PAGE_CLASSIFY_MODEL = os.environ.get("PAGE_CLASSIFY_MODEL", "google/gemini-2.5-flash")
 PAGE_CLASSIFY_SCHEMA = {
     "name": "page_classify",
     "strict": True,
@@ -387,7 +387,7 @@ def _rasterize_page_to_jpg_b64(path: Path, page_idx: int, dpi: int = 150) -> str
 
 def _gemini_quick_classify_page(img_b64: str, page_no: int,
                                  model: str | None = None) -> dict:
-    """Pass 1 — classify 1 trang ảnh: trả {doc_type, ten_chu_the}. Dùng flash-lite (cheap)."""
+    """Pass 1 — classify 1 trang ảnh: trả {doc_type, ten_chu_the}. Dùng flash để giữ chính xác page-boundary."""
     import httpx
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
