@@ -1266,6 +1266,54 @@ def _agent_from_title(raw_title: str) -> str:
     return rt.split(" - ", 1)[-1].strip() if " - " in rt else "?"
 
 
+async def _setup_streaming(bot, chat_id, reply_to_id: int | None = None):
+    """Gửi ack tin "🤖 ⏳" + trả (ack_message_id, on_chunk_callback) cho stream chat.
+
+    on_chunk(delta) async → buffer + throttled edit_message_text mỗi ~1.2s.
+    Caller dùng để pass cho `chatmod.answer_question(..., stream_callback=on_chunk)`.
+    Cuối: caller phải gọi edit_message_text 1 lần nữa với HTML final (linkify wrap).
+    """
+    ack = await bot.send_message(chat_id=int(chat_id), text="🤖 ⏳",
+                                  reply_to_message_id=reply_to_id)
+    msg_id = ack.message_id
+    state = {"buf": "", "last_edit": 0.0}
+    EDIT_INTERVAL = 1.2
+    MAX_PREVIEW = 3800   # Telegram message limit 4096; chừa cho " ⏳"
+
+    async def on_chunk(delta: str):
+        state["buf"] += delta
+        now = time.monotonic()
+        if now - state["last_edit"] >= EDIT_INTERVAL:
+            preview = state["buf"][:MAX_PREVIEW] + " ⏳"
+            try:
+                await bot.edit_message_text(chat_id=int(chat_id), message_id=msg_id,
+                                             text=preview, parse_mode=None,
+                                             disable_web_page_preview=True)
+                state["last_edit"] = now
+            except Exception:  # noqa: BLE001 — rate limit / no-change OK
+                pass
+
+    return msg_id, on_chunk
+
+
+async def _finalize_streaming(bot, chat_id, msg_id: int, final_html: str,
+                               plain_fallback: str) -> None:
+    """Edit ack tin thành final HTML (linkify wrapped). Fallback plain nếu HTML fail."""
+    try:
+        await bot.edit_message_text(chat_id=int(chat_id), message_id=msg_id,
+                                     text=final_html, parse_mode=ParseMode.HTML,
+                                     disable_web_page_preview=True)
+        return
+    except BadRequest as e:
+        logger.warning(f"streaming HTML edit fail ({e}); fallback plain")
+    try:
+        await bot.edit_message_text(chat_id=int(chat_id), message_id=msg_id,
+                                     text=plain_fallback or "(empty)", parse_mode=None,
+                                     disable_web_page_preview=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"streaming plain edit fail (ignored): {e}")
+
+
 async def on_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text or not msg.from_user:
@@ -1301,16 +1349,19 @@ async def on_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          "agent": _agent_from_title(info.get("raw_title", "")), "folder_id": info.get("folder_id", ""),
                          "drive_link": info.get("drive_link", "")}
             await context.bot.send_chat_action(chat_id=user_id, action="typing")
+            # Streaming: ack tin "🤖 ⏳" + edit_message mỗi 1.2s
+            ack_msg_id, on_chunk = await _setup_streaming(context.bot, user_id, reply_to_id=None)
             async with chatmod.CHAT_SEMAPHORE:
                 # Drive crawl chạy trực tiếp trên loop (Drive client httplib2 KHÔNG thread-safe);
-                # answer_question chỉ tách phần OpenRouter ra thread.
+                # answer_question stream qua OpenRouter (gemini-flash mặc định, pro nếu hard).
                 ctx = chatmod.get_case_context(info["folder_id"], applicant, SHARED_DRIVE_ID)
                 ans = await chatmod.answer_question(case_meta, ctx, sess["history"], text, SHARED_DRIVE_ID,
-                                                    session_key=f"dm:{user_id}")
+                                                    session_key=f"dm:{user_id}",
+                                                    stream_callback=on_chunk)
             sess["history"].append((text, ans))
-            await send_html(context.bot, user_id,
-                            chatmod.linkify_answer(ans, ctx.get("name_to_link") or {}, case_meta.get("drive_link", "")),
-                            plain_fallback=ans, disable_web_page_preview=True)
+            final_html = chatmod.linkify_answer(ans, ctx.get("name_to_link") or {},
+                                                 case_meta.get("drive_link", ""))
+            await _finalize_streaming(context.bot, user_id, ack_msg_id, final_html, ans)
             logger.info(f"CHAT DM user={user_id} case={applicant!r}")
             return
 
@@ -1350,15 +1401,19 @@ async def on_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "agent": _agent_from_title(info.get("raw_title", "")), "folder_id": info.get("folder_id", ""),
                      "drive_link": info.get("drive_link", "")}
         await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+        # Streaming: ack tin "🤖 ⏳" reply tới câu hỏi + edit_message mỗi 1.2s
+        ack_msg_id, on_chunk = await _setup_streaming(context.bot, chat.id,
+                                                       reply_to_id=msg.message_id)
         hist = chatmod.group_history(str(chat.id))
         async with chatmod.CHAT_SEMAPHORE:
             ctx = chatmod.get_case_context(info["folder_id"], applicant, SHARED_DRIVE_ID)  # Drive trên loop (không thread)
             ans = await chatmod.answer_question(case_meta, ctx, hist, question, SHARED_DRIVE_ID,
-                                                session_key=f"grp:{chat.id}")
+                                                session_key=f"grp:{chat.id}",
+                                                stream_callback=on_chunk)
         hist.append((question, ans))
-        await send_html(context.bot, chat.id,
-                        chatmod.linkify_answer(ans, ctx.get("name_to_link") or {}, case_meta.get("drive_link", "")),
-                        plain_fallback=ans, reply_to_message_id=msg.message_id, disable_web_page_preview=True)
+        final_html = chatmod.linkify_answer(ans, ctx.get("name_to_link") or {},
+                                             case_meta.get("drive_link", ""))
+        await _finalize_streaming(context.bot, chat.id, ack_msg_id, final_html, ans)
         logger.info(f"CHAT group={chat.id} user={user_id} case={applicant!r}")
     except Exception as e:  # noqa: BLE001
         logger.error(f"on_chat_message: {e}", exc_info=True)

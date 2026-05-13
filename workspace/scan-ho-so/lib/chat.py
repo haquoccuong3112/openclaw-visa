@@ -35,6 +35,9 @@ from collections import deque
 # config
 # ---------------------------------------------------------------------------
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "google/gemini-2.5-pro")
+# Streaming chat (Phase mới): flash mặc định, pro escalate câu khó.
+CHAT_MODEL_FAST = os.environ.get("CHAT_MODEL_FAST", "google/gemini-2.5-flash")
+CHAT_MODEL_HARD = os.environ.get("CHAT_MODEL_HARD", CHAT_MODEL)   # default pro
 CHAT_SCAN_MODEL = os.environ.get("CHAT_SCAN_MODEL", "google/gemini-2.5-flash-lite")  # OCR lại 1 file (NEED_FILE)
 CHAT_WEB_MODEL = os.environ.get("CHAT_WEB_MODEL", "google/gemini-2.5-flash")        # tra cứu web (NEED_WEB) — đi kèm OpenRouter web plugin
 CHAT_WEB_MAX_RESULTS = int(os.environ.get("CHAT_WEB_MAX_RESULTS", "4"))
@@ -704,10 +707,39 @@ def _try_link_intent(question: str, name_to_link: dict | None) -> str | None:
     return "\n".join(matched)
 
 
+# ===========================================================================
+# Hard-question detection — chọn model flash (mặc định) vs pro (câu reasoning sâu).
+# Goal: bot chat fast cho 80% câu hỏi (file X ghi gì / thiếu giấy gì / dẫn link),
+# escalate pro chỉ khi câu cần reasoning đa-giấy (phân tích / so sánh / mâu thuẫn).
+# ===========================================================================
+_HARD_KEYWORDS = (
+    "tại sao", "phân tích", "so sánh", "mâu thuẫn", "đối chiếu",
+    "tất cả", "toàn bộ", "thẩm định", "kiểm tra hết", "viết báo cáo",
+    "đánh giá", "tổng hợp", "rà soát", "lý do",
+)
+_HARD_LEN_THRESHOLD = 120
+
+
+def is_hard_question(q: str) -> bool:
+    """Heuristic chọn model: True → pro (reasoning), False → flash (Q&A nhanh)."""
+    if not q:
+        return False
+    q_lower = q.lower()
+    if len(q) > _HARD_LEN_THRESHOLD:
+        return True
+    return any(k in q_lower for k in _HARD_KEYWORDS)
+
+
 async def answer_question(case_meta: dict, ctx: dict, history, question: str, drive_id,
-                          model: str | None = None, session_key: str | None = None) -> str:
-    from .checklist import _call_openrouter
-    model = model or CHAT_MODEL
+                          model: str | None = None, session_key: str | None = None,
+                          stream_callback=None) -> str:
+    """Trả câu trả lời. Nếu `stream_callback` (async function) được pass, LLM call sẽ stream
+    qua callback (mỗi delta) → Telegram_listener edit_message để user thấy text "rớt" dần.
+    `model` không truyền → auto chọn fast/hard theo `is_hard_question(question)`.
+    """
+    from .checklist import _call_openrouter, _call_openrouter_stream
+    if model is None:
+        model = CHAT_MODEL_HARD if is_hard_question(question) else CHAT_MODEL_FAST
     today = time.strftime("%d/%m/%Y")
     doc_names = ctx.get("doc_names") or []
     applicant = case_meta.get("applicant", "?")
@@ -751,7 +783,16 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
         _li = _try_link_intent(question, ctx.get("name_to_link") or {})
         if _li:
             return _li
-        text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user()) or "").strip()
+        # ── Gọi LLM: stream nếu caller pass stream_callback (cho Telegram edit_message UX) ──
+        if stream_callback:
+            try:
+                text = (await _call_openrouter_stream(model, sysprompt, mk_user(),
+                                                       stream_callback) or "").strip()
+            except Exception as e:  # noqa: BLE001 — fallback non-stream
+                print(f"chat: stream lỗi ({type(e).__name__}: {e}) — fallback non-stream", flush=True)
+                text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user()) or "").strip()
+        else:
+            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user()) or "").strip()
         # ── Yêu cầu đổi tên file? (xử lý trước NEED_FILE/NEED_WEB) ──
         wren = parse_need_rename(text)
         if wren is not None:

@@ -539,6 +539,62 @@ def _trim_dataset_for_llm(dataset: list[dict]) -> list[dict]:
     return out
 
 
+async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
+                                   timeout: int = 300) -> str:
+    """Gọi OpenRouter với stream=True. Yield từng delta qua callback `on_chunk(text_delta)`
+    (async function). Trả về full text cuối cùng. Caller dùng on_chunk để edit Telegram tin.
+
+    SSE format (OpenAI-compatible):
+        data: {"choices":[{"delta":{"content":"..."}}]}
+        data: [DONE]
+
+    Lỗi → raise. Caller có thể fallback _call_openrouter (non-stream)."""
+    import httpx
+    import json as _json
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY chưa được cấu hình")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.1,
+        "stream": True,
+    }
+    buf: list[str] = []
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream(
+            "POST", "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"}, json=payload,
+        ) as resp:
+            if resp.status_code >= 400:
+                txt = (await resp.aread()).decode("utf-8", errors="replace")
+                raise RuntimeError(f"OpenRouter stream HTTP {resp.status_code}: {txt[:200]}")
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                chunk = line[6:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    d = _json.loads(chunk)
+                    choices = d.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = (choices[0].get("delta") or {}).get("content") or ""
+                    if delta:
+                        buf.append(delta)
+                        try:
+                            await on_chunk(delta)
+                        except Exception:  # noqa: BLE001 — on_chunk lỗi không phá stream
+                            pass
+                except _json.JSONDecodeError:
+                    continue
+    return _strip_fences("".join(buf))
+
+
 def _call_openrouter(model: str, system: str, user: str, timeout: int = 300,
                      json_mode: bool = False) -> str:
     """Gọi OpenRouter chat/completions. Trả về content (đã strip fences).
