@@ -102,6 +102,22 @@ def rename_file(file_id: str, new_name: str, drive_id: str | None = None) -> Non
     drive().files().update(**kwargs).execute()
 
 
+def move_file(file_id: str, new_parent_id: str, drive_id: str | None = None) -> None:
+    """Move 1 file sang folder cha mới (Drive cho phép 1 file nhiều parent — ta xoá hết
+    parent cũ + add parent mới ⇒ tương đương 'move'). File id giữ nguyên, link không đổi."""
+    svc = drive()
+    g_kwargs = dict(fileId=file_id, fields="parents")
+    u_kwargs = dict(fileId=file_id, addParents=new_parent_id, fields="id,parents")
+    if drive_id:
+        g_kwargs["supportsAllDrives"] = True
+        u_kwargs["supportsAllDrives"] = True
+    cur = svc.files().get(**g_kwargs).execute()
+    old_parents = cur.get("parents") or []
+    if old_parents:
+        u_kwargs["removeParents"] = ",".join(old_parents)
+    svc.files().update(**u_kwargs).execute()
+
+
 def download_file_text(file_id: str, drive_id: str | None = None, encoding: str = "utf-8") -> str:
     """Download a (small, text) file's bytes and decode → str. Read-only."""
     return download_file_bytes(file_id, drive_id).decode(encoding, errors="replace")

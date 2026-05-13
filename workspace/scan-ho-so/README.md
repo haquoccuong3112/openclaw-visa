@@ -8,7 +8,9 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
 - **`telegram_listener.py`** — the Telegram bot (`@donghanhprocessingbot`). Receives `.zip`s / files from
   customer (KH) groups → debounces a batch → spawns `scan_pipeline.py` as a subprocess → posts a summary
   + a short AI-checklist confirmation to the Pro group. Also handles staff Q&A (@mention / reply / DM) via
-  `lib/chat.py`, and on-demand `/check` re-runs the thẩm định. Telegram messages use `parse_mode=HTML`
+  `lib/chat.py`, and on-demand `/check` re-runs the thẩm định; **`/oldfile`** (Pro group) — scan
+  `<case>/Old File/` trên Drive và đẩy qua cùng pipeline như khi gửi file qua Telegram; file gốc chuyển
+  sang `Old File/_processed/`. Telegram messages use `parse_mode=HTML`
   (`send_html()` helper); the HTML is built by our code (`html.escape`), never by the LLM. **Group-title
   parser** (`parse_group_title()`): phân biệt KH vs Pro bằng chữ `Pro` (case-insensitive); hỗ trợ nhiều
   prefix (`DH Pro` / `DongHanh` / `Đồng Hành Pro` / `Đồng Hành`), em-dash / en-dash, token `KH` trên nhánh

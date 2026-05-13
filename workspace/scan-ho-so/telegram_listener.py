@@ -73,10 +73,11 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 # ── Project lib ──────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.google_clients import drive
-from lib.drive_helpers import get_or_create_folder
+from lib.drive_helpers import get_or_create_folder, list_folder, download_file_bytes, move_file
 from lib import chat as chatmod
 
 REGISTRY_LOCK = asyncio.Lock()
+_OLDFILE_LOCKS: dict[str, asyncio.Lock] = {}   # per-case lock cho lệnh /oldfile (key = folder_id)
 
 # ── Debounce / batching cho file upload từ nhóm KH ───────────────────────────
 # Telegram giao mỗi file của một lần "gửi nhiều file" thành 1 update; concurrent_updates(16)
@@ -117,6 +118,8 @@ STAFF_SHEET_TEMPLATE_ID = "1S0kr9nBuTJHLbTwa_O8XfYVvaadviVyamUBiUKMwWJM"
 SUMMARY_SHEET_ID = "1bPNea4i86yVqwTGx0IuKGv1t3PrDlKoPAg16yPNOnCs"
 TOP_FOLDERS       = ["Personal Docs", "Education", "Asset", "Employment"]
 OCR_META_FOLDER   = "_Bot OCR & Metadata"
+OLD_FILE_FOLDER   = "Old File"          # inbox cho hồ sơ cũ trên Drive (xử lý bằng lệnh /oldfile)
+OLD_FILE_PROCESSED = "_processed"       # subfolder của Old File: lưu bản gốc sau khi đã xử lý
 EXT_MIME = {
     ".pdf": "application/pdf",
     ".jpg": "image/jpeg",
@@ -338,6 +341,7 @@ def setup_drive_folder(case_name: str) -> tuple[str, str]:
     for f in TOP_FOLDERS:
         get_or_create_folder(f, folder_id, drive_id=SHARED_DRIVE_ID)
     get_or_create_folder(OCR_META_FOLDER, folder_id, drive_id=SHARED_DRIVE_ID)
+    get_or_create_folder(OLD_FILE_FOLDER, folder_id, drive_id=SHARED_DRIVE_ID)   # inbox cho hồ sơ cũ
     link = f"https://drive.google.com/drive/folders/{folder_id}"
     return folder_id, link
 
@@ -1092,6 +1096,151 @@ async def on_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_html(context.bot, chat_id, detail, disable_web_page_preview=True)
 
 
+# ── /oldfile: scan Drive folder `<case>/Old File` và đẩy qua cùng pipeline như Telegram batch ──
+async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return
+    chat_id = str(msg.chat.id)
+    info = (load_registry() or {}).get(chat_id) or {}
+    # Chỉ chạy trong nhóm Pro đã setup case (mirror on_check_command).
+    if info.get("kind") != "pro":
+        return
+    if not info.get("case_setup") or not info.get("folder_id"):
+        try:
+            await context.bot.send_message(chat_id=int(chat_id), text="⚠️ Group này chưa setup case.")
+        except Exception:
+            pass
+        return
+    folder_id = info["folder_id"]
+    applicant = info.get("applicant", "?")
+    drive_link = info.get("drive_link", "")
+    # kh_chat_id KHÔNG bắt buộc — Pro chat_id cũng resolve được case qua group_registry.json
+    # (resolve_from_registry chỉ cần folder_id, có ở cả Pro & KH side khi case_setup=true).
+
+    # Per-case lock: ngăn 2 lần /oldfile chạy đồng thời cùng case.
+    lock = _OLDFILE_LOCKS.setdefault(folder_id, asyncio.Lock())
+    if lock.locked():
+        try:
+            await context.bot.send_message(chat_id=int(chat_id),
+                text="⏳ Đang xử lý Old File, chờ chút.", reply_to_message_id=msg.message_id)
+        except Exception:
+            pass
+        return
+
+    async with lock:
+        # Lazy-create folder Old File (case cũ chưa có → tạo ngay).
+        try:
+            old_file_id = get_or_create_folder(OLD_FILE_FOLDER, folder_id, drive_id=SHARED_DRIVE_ID)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"/oldfile resolve Old File folder failed for {chat_id}: {e}", exc_info=True)
+            await context.bot.send_message(chat_id=int(chat_id), text=f"❌ Không truy cập được thư mục Old File: {e}")
+            return
+
+        try:
+            files = list_folder(old_file_id, drive_id=SHARED_DRIVE_ID)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"/oldfile list Old File failed for {chat_id}: {e}", exc_info=True)
+            await context.bot.send_message(chat_id=int(chat_id), text=f"❌ Không liệt kê được Old File: {e}")
+            return
+
+        # Bỏ qua subfolder _processed (list_folder vốn chỉ trả non-folder; vẫn defensive ở đây).
+        items = [(name, fid) for name, fid in files.items() if name and fid and name != OLD_FILE_PROCESSED]
+        if not items:
+            old_file_link = f"https://drive.google.com/drive/folders/{old_file_id}"
+            await send_html(context.bot, chat_id,
+                f'📂 Thư mục <a href="{html.escape(old_file_link, quote=True)}">Old File</a> '
+                f"của hồ sơ {html.escape(applicant)} đang trống. "
+                f"Anh kéo file (hoặc .zip) hồ sơ cũ vào đó rồi gõ lại /oldfile.",
+                disable_web_page_preview=True)
+            return
+
+        try:
+            await context.bot.send_message(chat_id=int(chat_id),
+                text=f"📥 Đang xử lý {len(items)} file từ Old File của {applicant}…",
+                reply_to_message_id=msg.message_id)
+        except Exception:
+            pass
+
+        # Download → workdir tạm. Giữ tên gốc trên Drive; dedup nếu trùng; bỏ ký tự `/`/`\` cho an toàn FS.
+        workdir = Path(tempfile.mkdtemp(prefix="donghanh_oldfile_"))
+        downloaded: list[tuple[str, str, str]] = []   # (drive_name, drive_file_id, local_name)
+        try:
+            for drive_name, drive_fid in items:
+                safe = re.sub(r"[\\/]+", "_", drive_name).strip() or f"file-{drive_fid}"
+                local = _unique_in_dir(workdir, [], safe)
+                try:
+                    data = download_file_bytes(drive_fid, drive_id=SHARED_DRIVE_ID)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"/oldfile download skip {drive_name!r} ({drive_fid}): {e}")
+                    continue
+                (workdir / local).write_bytes(data)
+                downloaded.append((drive_name, drive_fid, local))
+
+            if not downloaded:
+                await context.bot.send_message(chat_id=int(chat_id),
+                    text="⚠️ Không tải được file nào từ Old File. Xem log để chi tiết.")
+                return
+
+            _expand_zips_in_dir(workdir)
+
+            manifest = await run_scan_pipeline(workdir, chat_id, case_key=folder_id)
+            try:
+                chatmod.invalidate_case_cache(folder_id)
+            except Exception:
+                pass
+
+            if manifest is None:
+                logger.error(f"/oldfile scan_pipeline could not run for {chat_id} ({len(downloaded)} file)")
+                await context.bot.send_message(chat_id=int(chat_id),
+                    text="❌ scan_pipeline không chạy được; xem log để chi tiết.")
+                return
+
+            if not manifest.get("items"):
+                await context.bot.send_message(chat_id=int(chat_id),
+                    text="⚠️ Lô Old File không có gì để xử lý.")
+                return
+
+            await send_html(context.bot, chat_id, summarize_manifest(manifest, drive_link),
+                            disable_web_page_preview=True)
+            _, ck_detail = _checklist_telegram_lines(manifest)
+            if ck_detail:
+                try:
+                    await send_html(context.bot, chat_id, ck_detail, disable_web_page_preview=True)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"/oldfile checklist detail send failed: {e}")
+
+            # Move các file gốc trong Old File → Old File/_processed (chỉ chạy khi manifest có items).
+            try:
+                processed_id = get_or_create_folder(OLD_FILE_PROCESSED, old_file_id, drive_id=SHARED_DRIVE_ID)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"/oldfile create _processed failed: {e}")
+                processed_id = None
+            if processed_id:
+                moved = 0
+                for drive_name, drive_fid, _local in downloaded:
+                    try:
+                        move_file(drive_fid, processed_id, drive_id=SHARED_DRIVE_ID)
+                        moved += 1
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"/oldfile move {drive_name!r} ({drive_fid}) → _processed failed: {e}")
+                logger.info(f"/oldfile moved {moved}/{len(downloaded)} file vào _processed")
+
+            c = manifest.get("counts", {}) or {}
+            logger.info(f"OLDFILE pro_chat={chat_id} case={applicant!r} "
+                        f"N_in={len(downloaded)} uploaded={c.get('uploaded',0)} "
+                        f"no_ocr={c.get('uploaded-no-ocr',0)} dup={c.get('duplicate',0)} "
+                        f"failed={c.get('failed',0)}")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"/oldfile {chat_id}: {e}", exc_info=True)
+            try:
+                await context.bot.send_message(chat_id=int(chat_id), text=f"❌ Lỗi khi xử lý Old File: {e}")
+            except Exception:
+                pass
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
 # ── Chat: nhân viên hỏi-đáp về hồ sơ KH (nhóm Pro khi @mention/reply bot · DM riêng) ──────────
 def _agent_from_title(raw_title: str) -> str:
     rt = raw_title or ""
@@ -1244,6 +1393,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(16).build()
     app.add_handler(ChatMemberHandler(on_bot_join, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CommandHandler("check", on_check_command))
+    app.add_handler(CommandHandler("oldfile", on_oldfile_command))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.TEXT, remember_staff_activity), group=1)
     app.add_handler(MessageHandler(filters.ALL, debug_all), group=1)

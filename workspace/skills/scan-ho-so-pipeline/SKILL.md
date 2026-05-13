@@ -225,6 +225,18 @@ in `asyncio.to_thread` (their own `httpx.Client`); all Google-Drive calls run on
 main thread's Drive use segfaults the process). Handler `on_chat_message` in `telegram_listener.py`
 (registered `group=2`, `filters.TEXT & ~COMMAND`).
 
+## Lệnh `/oldfile` — xử lý hồ sơ cũ đã có sẵn trên Drive
+
+Với khách hàng đã có 1 đống hồ sơ trên Drive **trước khi bot join Telegram**, dùng lệnh `/oldfile` trong
+nhóm **Pro** để chạy chính pipeline trên những file đó. Mỗi case có subfolder `<case>/Old File/` (bot
+tự tạo lúc setup, cho case cũ thì lazy-create khi `/oldfile` chạy lần đầu). Flow: staff kéo file (hoặc
+`.zip`) vào `Old File/` trên Drive → gõ `/oldfile` ở nhóm Pro → bot ack `📥 Đang xử lý N file…` → download
+về tempdir → unzip → `run_scan_pipeline` (cùng subprocess như Telegram batch) → invalidate cache chat →
+post summary + ✅ AI checklist lên Pro group → move file gốc từ `Old File/` sang `Old File/_processed/`
+(giữ bản gốc, tránh reprocess). Per-case lock `_OLDFILE_LOCKS` chống double-fire; pipeline dedup nên
+retry idempotent. Quota Drive: 0 call idle, chỉ chạm Drive khi staff bấm lệnh. Handler
+`on_oldfile_command` đăng ký qua `CommandHandler("oldfile", …)`.
+
 ## Drive whitelist (must respect)
 
 The case folder lives inside the bot's sandbox (`OpenClaw` folder, id
