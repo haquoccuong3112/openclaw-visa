@@ -18,7 +18,15 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   `python3 telegram_listener.py --self-test`.
 - **`scan_pipeline.py`** — the unzip → Gemini-OCR → classify → SOP-rename → upload-to-Drive → AI-thẩm-định
   pipeline. Gemini-OCR runs **in parallel** across files (`SCAN_OCR_WORKERS` threads, default 5); classify /
-  rename / Drive-upload / thẩm-định stay sequential. Manifest covers every input file; per-file retries; idempotent re-runs. Run by the bot
+  rename / Drive-upload / thẩm-định stay sequential. Default OCR model `gemini-2.5-flash` (env `GEMINI_MODEL`)
+  với `response_format: json_schema` (strict); 3-tier fallback `json_schema → json_object → off` cho model
+  chưa hỗ trợ. **Multi-page PDF nhiều loại giấy tờ** đi qua flow 2-pass: Pass 1 — rasterize từng trang
+  (`pypdfium2`) → `gemini-2.5-flash-lite` quick-classify per page (env `PAGE_CLASSIFY_MODEL`); group trang
+  liên tiếp cùng loại → segment. Pass 2 — split PDF (`pypdf`) + OCR đầy đủ per segment, mỗi segment thành
+  1 file riêng (status `uploaded-split`). File `confidence=low + tag=Khac` → escalate `gemini-2.5-pro` 1 call
+  để cứu. File đã có hash SHA-1 trong sidecar → status `duplicate-by-hash` (skip upload, KH gửi lại không
+  tạo trùng). Relation tag (bo/me/vo/chong/con…) tự đính vào filename: `CCCD bo-Nguyen Van A.pdf`.
+  Manifest covers every input file; per-file retries; idempotent re-runs. Run by the bot
   (subprocess) and by the OpenClaw agent via the `../skills/scan-ho-so-pipeline/` skill (which is *just*
   `SKILL.md` — the procedure docs; the code is here). CLI: `python3 scan_pipeline.py <zip|dir>
   --from-registry <chat-id> --manifest <path>` (or `--case-folder-id … --applicant …`); `--dry-run`,

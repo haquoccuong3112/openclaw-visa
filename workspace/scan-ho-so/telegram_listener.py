@@ -803,17 +803,21 @@ def summarize_manifest(m: dict, drive_link: str = "") -> str:
     total = m.get("total_input_files", len(items))
     no_ocr = c.get("uploaded-no-ocr", 0)
     dup, failed = c.get("duplicate", 0), c.get("failed", 0)
+    review = [it for it in items if it.get("needs_review")]
     lines: list[str] = []
     if failed == 0:
         lines.append(html.escape(f"✅ Đã xử lý {total} file"))
     else:
         lines.append(html.escape(f"⚠️ Đã xử lý {total - failed}/{total} file — {failed} file LỖI, sẽ chạy lại"))
+    if review:
+        lines.append(f"⚠️ <b>{len(review)} file cần kiểm tra thủ công</b> — danh sách bên dưới có icon ⚠️.")
     extra = []
     if no_ocr: extra.append(f"{no_ocr} file không OCR (cần kiểm tra tên)")
     if dup:    extra.append(f"{dup} file đã có sẵn")
     if extra:  lines.append(html.escape("   (" + "; ".join(extra) + ")"))
     lines.append("")
-    mark = {"uploaded": "•", "uploaded-no-ocr": "▫", "duplicate": "↺", "failed": "✗"}
+    mark = {"uploaded": "•", "uploaded-no-ocr": "▫", "duplicate": "↺",
+            "uploaded-split": "✂", "duplicate-by-hash": "🔁", "failed": "✗"}
     for i, it in enumerate(items, 1):
         st = it.get("status", "?")
         if st == "failed":
@@ -821,9 +825,12 @@ def summarize_manifest(m: dict, drive_link: str = "") -> str:
                          + " — LỖI: " + html.escape(str(it.get("error", "?"))))
         else:
             name = it.get("new_name") or it.get("src_name") or "?"
-            rv = " ⚠️" if it.get("needs_review") else ""
-            lines.append(f"{i}. {mark.get(st, '•')} " + _a(it.get("drive_link", ""), name) + rv)
-    review = [it for it in items if it.get("needs_review")]
+            rv_prefix = "⚠️ " if it.get("needs_review") else ""
+            suffix = ""
+            if it.get("needs_review") and (it.get("tag") or "").lower() == "khac":
+                suffix = " (không nhận diện được — kiểm tra)"
+            lines.append(f"{i}. {mark.get(st, '•')} {rv_prefix}"
+                         + _a(it.get("drive_link", ""), name) + html.escape(suffix))
     if review:
         lines.append("")
         lines.append("Cần kiểm tra: " + ", ".join(
@@ -1389,6 +1396,28 @@ def _self_test_parse_titles() -> None:
     assert _canon_visa("farm") == "FARM"
 
 
+def _self_test_summary() -> None:
+    """Fix 4 — surface needs_review trong summarize_manifest()."""
+    manifest_ok = {"total_input_files": 2, "counts": {"uploaded": 2},
+                   "items": [
+                       {"src_name": "a.pdf", "new_name": "CCCD-Foo.pdf", "tag": "CCCD",
+                        "status": "uploaded", "needs_review": False, "drive_link": "https://x"},
+                       {"src_name": "b.pdf", "new_name": "Khac-Foo.pdf", "tag": "Khac",
+                        "status": "uploaded", "needs_review": True, "drive_link": "https://y"},
+                   ]}
+    out = summarize_manifest(manifest_ok, drive_link="https://drive/x")
+    assert "1 file cần kiểm tra thủ công" in out, out
+    assert "⚠️ " in out, out
+    assert "không nhận diện được — kiểm tra" in out, out  # Khac suffix
+    # Không có needs_review → không có header cảnh báo
+    out2 = summarize_manifest({"total_input_files": 1, "counts": {"uploaded": 1},
+                               "items": [{"src_name": "c.pdf", "new_name": "CCCD-Foo.pdf",
+                                          "tag": "CCCD", "status": "uploaded",
+                                          "needs_review": False, "drive_link": "https://z"}]},
+                              drive_link="")
+    assert "cần kiểm tra thủ công" not in out2, out2
+
+
 def main():
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(16).build()
     app.add_handler(ChatMemberHandler(on_bot_join, ChatMemberHandler.MY_CHAT_MEMBER))
@@ -1404,6 +1433,7 @@ def main():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         _self_test_parse_titles()
+        _self_test_summary()
         print("OK")
         sys.exit(0)
     main()

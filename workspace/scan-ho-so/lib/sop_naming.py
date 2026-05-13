@@ -32,6 +32,8 @@ DOC_TYPE_PATTERNS: list[tuple[str, str, str]] = [
     (r"xac nhan hoc|xn hoc|giay xn hoc", "XN hoc", "Personal Docs"),
     (r"cu tru|xac nhan cu tru|xnct", "XNCT", "Personal Docs"),
     (r"ly lich tu phap|lltp|phieu ll", "LLTP", "Personal Docs"),
+    (r"hien mau|chung nhan hien mau|giay chung nhan hien mau|don hien mau|so hien mau", "Hien mau", "Personal Docs"),
+    (r"\bly hon\b|don ly hon|quyet dinh ly hon|ban an ly hon|thoa thuan ly hon|don thuan tinh ly hon", "Ly hon", "Personal Docs"),
     (r"giay phep lai xe|gplx|bang lai", "GPLX", "Personal Docs"),
     (r"anh the|hinh the|the\s*\d\s*x\s*\d|anh\s*\d\s*x\s*\d|anh\s*ho\s*chieu|id\s*photo|passport\s*photo", "Anh the", "Personal Docs"),
     (r"\bbhxh\b|bao hiem xa hoi", "BHXH", "Personal Docs"),
@@ -150,6 +152,8 @@ FILENAME_HINTS: list[tuple[str, str, str]] = [
     (r"\bgplx\b|bang\s*lai|giay\s*phep\s*lai\s*xe", "GPLX", "Personal Docs"),
     (r"\banh\s*the\b|id\s*photo|passport\s*photo|\bportrait\b|\b\d\s*x\s*\d\b", "Anh the", "Personal Docs"),
     (r"\bxnct\b|cu\s*tru", "XNCT", "Personal Docs"),
+    (r"\bhien\s*mau\b", "Hien mau", "Personal Docs"),
+    (r"\bly\s*hon\b|\bqd\s*ly\s*hon\b", "Ly hon", "Personal Docs"),
     (r"\biom\b", "IOM", "Personal Docs"),
     (r"\bsyll\b|so\s*yeu\s*ly\s*lich|thong\s*tin\s*ca\s*nhan|to\s*khai", "CV", "Personal Docs"),
     (r"ho\s*chieu|passport", "Passport", "Personal Docs"),
@@ -328,4 +332,13 @@ if __name__ == "__main__":
     # CCCD (ảnh chân dung chỉ in TRÊN thẻ) → vẫn CCCD, KHÔNG bị cờ la_anh_the kéo thành "Anh the"
     assert classify_doc_type("Căn cước công dân", "thẻ căn cước có ảnh chân dung và chip", "CCCD.pdf", extracted={"la_anh_the": True}).tag == "CCCD"
     assert classify_doc_type("", "", "CCCD.pdf", extracted={"la_anh_the": True}).tag == "CCCD"        # tên file CCCD thắng cờ la_anh_the
+    # Fix 2 — 2 pattern mới + KHÔNG regress GKH
+    assert classify_doc_type("Giấy chứng nhận hiến máu", "Đã hiến máu lần thứ 3", "").tag == "Hien mau"
+    assert classify_doc_type("Quyết định ly hôn", "Tòa án nhân dân huyện X", "QD-Ly hon.pdf").tag == "Ly hon"
+    assert classify_doc_type("Giấy đăng ký kết hôn", "", "").tag == "GKH"
+    # Fix 1 — extract_relation + build_filename slot relation
+    assert extract_relation("Chu Thi Le", "Nguyen Van A", "Bố của đương đơn là Nguyễn Văn A") == "ba"
+    assert extract_relation("Chu Thi Le", "Chu Thi Le", "") is None
+    assert build_filename("CCCD", "Nguyen Van A", ".pdf", relation="ba") == "CCCD ba-Nguyen Van A.pdf"
+    assert build_filename("CCCD", "Chu Thi Le", ".pdf") == "CCCD-Chu Thi Le.pdf"  # no-relation form không đổi
     print("classify guards OK")
