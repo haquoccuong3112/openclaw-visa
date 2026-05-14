@@ -49,7 +49,7 @@ from pathlib import Path
 
 from telegram import Update, Bot
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, ChatMigrated
+from telegram.error import BadRequest, ChatMigrated, TimedOut, NetworkError, RetryAfter
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -1324,11 +1324,26 @@ async def _setup_streaming(bot, chat_id, reply_to_id: int | None = None):
     ack = await bot.send_message(chat_id=int(chat_id), text="🤖 ⏳",
                                   reply_to_message_id=reply_to_id)
     msg_id = ack.message_id
-    state = {"buf": "", "last_edit": 0.0}
+    state = {"buf": "", "last_edit": 0.0, "thinking_shown": False}
     EDIT_INTERVAL = 1.2
+    THINKING_INTERVAL = 5.0   # Fix A — đỡ rate limit khi reasoning stream nhanh
     MAX_PREVIEW = 3800   # Telegram message limit 4096; chừa cho " ⏳"
 
     async def on_chunk(delta: str):
+        # Fix A — delta="" là heartbeat từ phase reasoning (DeepSeek V4). Hiển thị spinner
+        # để user biết bot chưa treo, KHÔNG ghi vào buf.
+        if not delta:
+            now = time.monotonic()
+            if not state["thinking_shown"] and now - state["last_edit"] >= THINKING_INTERVAL:
+                try:
+                    await bot.edit_message_text(chat_id=int(chat_id), message_id=msg_id,
+                                                 text="🤖 đang suy nghĩ… ⏳", parse_mode=None,
+                                                 disable_web_page_preview=True)
+                    state["last_edit"] = now
+                    state["thinking_shown"] = True
+                except Exception:  # noqa: BLE001
+                    pass
+            return
         state["buf"] += delta
         now = time.monotonic()
         if now - state["last_edit"] >= EDIT_INTERVAL:
@@ -1338,6 +1353,7 @@ async def _setup_streaming(bot, chat_id, reply_to_id: int | None = None):
                                              text=preview, parse_mode=None,
                                              disable_web_page_preview=True)
                 state["last_edit"] = now
+                state["thinking_shown"] = False   # reset — đã sang content phase
             except Exception:  # noqa: BLE001 — rate limit / no-change OK
                 pass
 
@@ -1346,11 +1362,18 @@ async def _setup_streaming(bot, chat_id, reply_to_id: int | None = None):
 
 async def _finalize_streaming(bot, chat_id, msg_id: int, final_html: str,
                                plain_fallback: str) -> None:
-    """Edit ack tin thành final HTML (linkify wrapped). Fallback plain nếu HTML fail."""
+    """Edit ack tin thành final HTML (linkify wrapped). Fallback plain nếu HTML fail.
+
+    Fix B: User đã thấy nội dung qua stream. Nếu finalize timeout/network → KHÔNG bubble lên
+    `on_chat_message` (sẽ post "❌ Lỗi khi trả lời" thừa thãi). Chỉ log warning + giữ text streamed.
+    """
     try:
         await bot.edit_message_text(chat_id=int(chat_id), message_id=msg_id,
                                      text=final_html, parse_mode=ParseMode.HTML,
                                      disable_web_page_preview=True)
+        return
+    except (TimedOut, NetworkError, RetryAfter) as e:
+        logger.warning(f"streaming HTML finalize timeout/network (giữ stream text): {e}")
         return
     except BadRequest as e:
         logger.warning(f"streaming HTML edit fail ({e}); fallback plain")
@@ -1358,6 +1381,8 @@ async def _finalize_streaming(bot, chat_id, msg_id: int, final_html: str,
         await bot.edit_message_text(chat_id=int(chat_id), message_id=msg_id,
                                      text=plain_fallback or "(empty)", parse_mode=None,
                                      disable_web_page_preview=True)
+    except (TimedOut, NetworkError, RetryAfter) as e:
+        logger.warning(f"streaming plain finalize timeout (giữ stream text): {e}")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"streaming plain edit fail (ignored): {e}")
 

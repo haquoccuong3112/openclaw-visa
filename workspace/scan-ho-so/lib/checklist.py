@@ -604,11 +604,23 @@ async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
                     choices = d.get("choices") or []
                     if not choices:
                         continue
-                    delta = (choices[0].get("delta") or {}).get("content") or ""
-                    if delta:
-                        buf.append(delta)
+                    delta_obj = choices[0].get("delta") or {}
+                    content_delta = delta_obj.get("content") or ""
+                    # Fix A — DeepSeek V4 reasoning model: emit `delta.reasoning` (chain-of-thought)
+                    # ~30-60s TRƯỚC khi xuất `delta.content`. Trước khi fix, on_chunk không gọi
+                    # trong giai đoạn reasoning → Telegram ack đứng yên cả phút, user tưởng treo.
+                    # Giải pháp: callback heartbeat (delta="") cho mỗi reasoning chunk →
+                    # _setup_streaming.on_chunk hiển thị "🤖 đang suy nghĩ… ⏳".
+                    reasoning_delta = delta_obj.get("reasoning") or ""
+                    if reasoning_delta:
                         try:
-                            await on_chunk(delta)
+                            await on_chunk("")   # heartbeat — caller dùng làm spinner
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if content_delta:
+                        buf.append(content_delta)
+                        try:
+                            await on_chunk(content_delta)
                         except Exception:  # noqa: BLE001 — on_chunk lỗi không phá stream
                             pass
                 except _json.JSONDecodeError:

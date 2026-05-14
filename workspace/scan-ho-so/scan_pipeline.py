@@ -404,6 +404,9 @@ PAGE_CLASSIFY_MODEL = os.environ.get("PAGE_CLASSIFY_MODEL", "google/gemini-2.5-f
 PAGE_CLASSIFY_PRO_MODEL = os.environ.get("PAGE_CLASSIFY_PRO_MODEL", "google/gemini-2.5-pro")
 # Ngưỡng escalate: nếu ≥30% trang có confidence low → batch escalate qua pro.
 PAGE_CLASSIFY_PRO_RATIO = float(os.environ.get("PAGE_CLASSIFY_PRO_RATIO", "0.30"))
+# Fix D — Force Pro cho Pass 1 ngay từ đầu nếu PDF ≥N trang. Flash confident-wrong trên batch lớn
+# (vd 53 trang multi-doc bị nhận là 1 XNCT). Pro chậm hơn + tốn $0.16/53-trang nhưng chính xác.
+PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES = int(os.environ.get("PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES", "10"))
 PAGE_CLASSIFY_SCHEMA = {
     "name": "page_classify",
     "strict": True,
@@ -601,10 +604,20 @@ def detect_pdf_segments(path: Path) -> list[dict]:
 
     P1.1: nếu ≥30% trang ra "Khac"/low-conf, escalate những trang đó qua
     PAGE_CLASSIFY_PRO_MODEL (gemini-2.5-pro 1 batch) để re-classify. Diệt bug
-    "11 trang gộp Passport" khi Flash bị choke ở giữa file đa loại."""
+    "11 trang gộp Passport" khi Flash bị choke ở giữa file đa loại.
+
+    Fix D: PDF dài (≥PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES) dùng Pro ngay từ Pass 1, không qua Flash.
+    Lý do: Flash hay confident-wrong trên batch nhiều trang cùng phông (vd 53 trang multi-doc
+    bị Flash classify là 1 XNCT → P1.1 escalate không trigger vì không có trang low-conf).
+    """
     n_pages = _count_pdf_pages(path)
     if n_pages <= 1:
         return []
+    # Fix D — chọn model cho Pass 1 dựa vào độ dài PDF.
+    use_pro_for_pass1 = n_pages >= PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES
+    pass1_model = PAGE_CLASSIFY_PRO_MODEL if use_pro_for_pass1 else None
+    if use_pro_for_pass1:
+        log(f"  page-classify Pass 1 FORCE-PRO: {n_pages} trang ≥ {PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES} → {PAGE_CLASSIFY_PRO_MODEL}")
     # Rasterize 1 lần, dùng lại nếu phải escalate.
     rendered: list[str | None] = []
     for i in range(n_pages):
@@ -620,27 +633,29 @@ def detect_pdf_segments(path: Path) -> list[dict]:
             pages_class.append({"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"})
             continue
         try:
-            c = _gemini_quick_classify_page(img_b64, page_no=i + 1)
+            c = _gemini_quick_classify_page(img_b64, page_no=i + 1, model=pass1_model)
         except Exception as e:  # noqa: BLE001
             log(f"  page-classify lỗi page={i+1}: {type(e).__name__}: {e}")
             c = {"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"}
         pages_class.append(c)
 
     # P1.1 escalation: re-classify trang Khac / low qua pro model.
-    low_idx = [i for i, p in enumerate(pages_class)
-               if (p.get("doc_type") or "").strip().lower() in ("khac", "") or p.get("confidence") == "low"]
-    if low_idx and len(low_idx) >= max(2, int(n_pages * PAGE_CLASSIFY_PRO_RATIO)):
-        log(f"  page-classify escalate: {len(low_idx)}/{n_pages} trang low-conf → {PAGE_CLASSIFY_PRO_MODEL}")
-        for i in low_idx:
-            if rendered[i] is None:
-                continue
-            try:
-                c = _gemini_quick_classify_page(rendered[i], page_no=i + 1, model=PAGE_CLASSIFY_PRO_MODEL)
-                # Chỉ overwrite nếu pro cho confidence ≥ medium (tránh thay Khac/low bằng Khac/low khác)
-                if c.get("confidence") in ("high", "medium") and (c.get("doc_type") or "").strip().lower() not in ("", "khac"):
-                    pages_class[i] = c
-            except Exception as e:  # noqa: BLE001
-                log(f"  page-classify pro lỗi page={i+1}: {type(e).__name__}: {e}")
+    # Fix D — skip nếu Pass 1 đã dùng Pro (không escalate lên cùng model).
+    if not use_pro_for_pass1:
+        low_idx = [i for i, p in enumerate(pages_class)
+                   if (p.get("doc_type") or "").strip().lower() in ("khac", "") or p.get("confidence") == "low"]
+        if low_idx and len(low_idx) >= max(2, int(n_pages * PAGE_CLASSIFY_PRO_RATIO)):
+            log(f"  page-classify escalate: {len(low_idx)}/{n_pages} trang low-conf → {PAGE_CLASSIFY_PRO_MODEL}")
+            for i in low_idx:
+                if rendered[i] is None:
+                    continue
+                try:
+                    c = _gemini_quick_classify_page(rendered[i], page_no=i + 1, model=PAGE_CLASSIFY_PRO_MODEL)
+                    # Chỉ overwrite nếu pro cho confidence ≥ medium (tránh thay Khac/low bằng Khac/low khác)
+                    if c.get("confidence") in ("high", "medium") and (c.get("doc_type") or "").strip().lower() not in ("", "khac"):
+                        pages_class[i] = c
+                except Exception as e:  # noqa: BLE001
+                    log(f"  page-classify pro lỗi page={i+1}: {type(e).__name__}: {e}")
 
     segments = _group_consecutive(pages_class)
     return segments if len(segments) >= 2 else []
