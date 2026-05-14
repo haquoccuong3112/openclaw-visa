@@ -80,11 +80,18 @@ def _load_relation_map_from_yaml() -> dict[str, list[str]]:
 RELATION_MAP = _load_relation_map_from_yaml()
 
 
-def extract_relation(applicant: str, subject: str, summary: str = "") -> Optional[str]:
-    """Return SOP-format relation tag if subject != applicant.
+def extract_relation(applicant: str, subject: str, summary: str = "",
+                      doc_tag: str = "", extracted: Optional[dict] = None) -> Optional[str]:
+    """Trả SOP relation tag (`bo`/`me`/`vo`/`con`...) nếu subject ≠ applicant VÀ có evidence.
 
-    Heuristic: if subject_name == applicant_name → no relation.
-    Otherwise try to detect from summary text mentions like "mẹ là ...", "bố ...".
+    P2.4 — siết heuristic:
+      - Whitelist `doc_tag`: chỉ tag relation cho giấy tờ nhân thân (CCCD, GKS, GPLX,
+        Passport, Ca vet xe, So dat, STK, Vang, XN so du, GKH, LLTP). Không tag cho
+        Sao ke / HD / Bien lai / Anh — đỡ "Khac con-..." vô căn cứ.
+      - Ground truth từ `extracted`: nếu subject trùng `ho_ten_cha` → tag `bo`; trùng
+        `ho_ten_me` → `me`; trùng `ho_ten_vo_chong` → `vo`/`chong` (theo gender nếu có).
+      - Fallback summary: relation keyword phải xuất hiện **trong cùng cụm 30 ký tự**
+        với tên subject (không phải scan toàn summary).
     """
     if not subject or not applicant:
         return None
@@ -92,16 +99,58 @@ def extract_relation(applicant: str, subject: str, summary: str = "") -> Optiona
     s = strip_diacritics(subject).lower().strip()
     if not a or not s or a == s:
         return None
-    # Check summary for explicit relation mentions about subject
+    # Whitelist doc_tag (None / "" → cho phép apply để giữ tương thích với caller cũ).
+    _RELATION_DOC_TAGS = {
+        "CCCD", "Passport", "GKS", "GKH", "GPLX", "Ca vet xe",
+        "So dat", "So dat NN", "STK", "Vang", "XN so du", "LLTP",
+        "Hien mau", "BHXH", "BHYT", "Medical", "IOM", "Bang cap",
+        "XN hoc", "XNCT",
+    }
+    if doc_tag and doc_tag not in _RELATION_DOC_TAGS:
+        return None
+
+    # Ground-truth qua extracted (mạnh hơn fallback summary scan).
+    if isinstance(extracted, dict):
+        def _norm(x: str) -> str:
+            return strip_diacritics(str(x or "")).lower().strip()
+        cha = _norm(extracted.get("ho_ten_cha"))
+        me = _norm(extracted.get("ho_ten_me"))
+        vo_chong = _norm(extracted.get("ho_ten_vo_chong"))
+        if cha and (cha == s or _name_equiv(cha, s)):
+            return "bo"
+        if me and (me == s or _name_equiv(me, s)):
+            return "me"
+        if vo_chong and (vo_chong == s or _name_equiv(vo_chong, s)):
+            # Default `vo` (vợ) — staff thường lấy đứng tên đương đơn nam.
+            # Nếu extracted.gioi_tinh="Nam" → còn lại `chong`.
+            return "chong" if _norm(extracted.get("gioi_tinh")) == "nam" else "vo"
+
+    # Fallback: scan summary CHỈ trong cụm ≤30 ký tự gần tên subject.
     text = strip_diacritics(summary or "").lower()
-    for relation, triggers in RELATION_MAP.items():
-        for t in triggers:
-            if t.strip() in text:
-                # crude: assume mention applies to subject if subject also appears
-                if s.split()[-1] in text or len(s.split()) > 1 and s.split()[0] in text:
+    s_tokens = [tok for tok in s.split() if len(tok) >= 2]
+    if not s_tokens:
+        return None
+    # Tìm vị trí xuất hiện của tên subject trong text — chọn token cuối (thường khác biệt nhất).
+    needle = s_tokens[-1]
+    for m in re.finditer(re.escape(needle), text):
+        start, end = m.start(), m.end()
+        # Cửa sổ 30 chars trước + 30 chars sau tên.
+        window = text[max(0, start - 30):min(len(text), end + 30)]
+        for relation, triggers in RELATION_MAP.items():
+            for t in triggers:
+                if t.strip() and t.strip() in window:
                     return relation
-    # Unknown relation → return None, caller decides whether to mark needs_review
     return None
+
+
+def _name_equiv(a: str, b: str) -> bool:
+    """2 tên 'gần như cùng người': cùng họ + cùng tên cuối (bỏ qua tên đệm khác biệt nhỏ).
+    A = 'nguyen thi binh', B = 'nguyen binh' → True.
+    A = 'le van a', B = 'le van b' → False (tên cuối khác)."""
+    at, bt = a.split(), b.split()
+    if not at or not bt:
+        return False
+    return at[0] == bt[0] and at[-1] == bt[-1]
 
 
 # ============================================================
@@ -142,13 +191,36 @@ def classify_doc_type(
       4. Summary as last resort (low, needs_review).
     """
     # Pass 0: tờ tự khai / viết tay → CV, KHÔNG phải CCCD/giấy chính thức (kể cả khi tên file/doc_type nói "CCCD").
+    # P2.2 — siết: nếu summary nói RÕ là 1 loại văn bản chính thức khác (XNCT, khám sức khỏe,
+    # xác nhận đất NN, trích lục, hiến máu, xác nhận số dư, xác nhận độc thân, HĐ tặng,
+    # chuyển nhượng QSD đất, học bạ…) → BỎ guard CV, để pass 1-4 chạy đúng loại.
     _la_to_khai = bool(isinstance(extracted, dict) and extracted.get("la_to_khai"))
     _g_hay = strip_diacritics(f"{raw_doc_type or ''} {summary or ''}").lower()
-    if _la_to_khai or (
+    _other_doc_kw = re.search(
+        r"xac\s*nhan\s*cu\s*tru|"
+        r"kham\s*suc\s*khoe|e[-\s]?medical|medical\s*information|"
+        r"don\s*xac\s*nhan|xac\s*nhan\s*co\s*dat\s*nong\s*nghiep|"
+        r"trich\s*luc|cai\s*chinh\s*ho\s*tich|"
+        r"chung\s*nhan\s*hien\s*mau|hien\s*mau|"
+        r"xac\s*nhan\s*so\s*du|so\s*tiet\s*kiem|"
+        r"xac\s*nhan\s*tinh\s*trang\s*hon\s*nhan|xac\s*nhan\s*doc\s*than|chua\s*dang\s*ky\s*ket\s*hon|"
+        r"hop\s*dong\s*tang|hop\s*dong\s*cho|hop\s*dong\s*chuyen\s*nhuong|"
+        r"quyen\s*su\s*dung\s*dat|gcn\s*quyen\s*su\s*dung|"
+        r"hoc\s*ba|bang\s*tot\s*nghiep|chung\s*chi\s*tin\s*hoc|"
+        r"hop\s*dong\s*thue|hop\s*dong\s*lao\s*dong|"
+        r"giay\s*phep\s*lai\s*xe|chung\s*nhan\s*dang\s*ky\s*xe|cavet|ca\s*vet|"
+        r"bao\s*hiem\s*xa\s*hoi|bao\s*hiem\s*y\s*te",
+        _g_hay,
+    )
+    if (_la_to_khai or (
         re.search(r"tu\s*khai|to\s*khai|viet\s*tay|bieu\s*mau|tu\s*dien|tu\s*ghi|tu\s*viet|"
-                  r"thong\s*tin\s*gia\s*dinh|so\s*yeu|phieu\s*khai|khai\s*bao\s*thong\s*tin", _g_hay)
+                  r"thong\s*tin\s*gia\s*dinh|phieu\s*khai|khai\s*bao\s*thong\s*tin", _g_hay)
         and re.search(r"\bcccd\b|can\s*cuoc|chung\s*minh|\bcmnd\b|thong\s*tin\s*ca\s*nhan", _g_hay)
-    ):
+    )) and not _other_doc_kw:
+        # Phân biệt SYLL (có dấu xã) vs CV (không dấu) — đã thêm field extracted.co_dau_xa_phuong từ P3.1.
+        _co_dau_xa = bool(isinstance(extracted, dict) and extracted.get("co_dau_xa_phuong"))
+        if _co_dau_xa:
+            return Classification(tag="SYLL", folder="Personal Docs", confidence="medium", needs_review=False)
         return Classification(tag="CV", folder="Personal Docs", confidence="medium", needs_review=True)
 
     is_unclear = (not raw_doc_type) or any(

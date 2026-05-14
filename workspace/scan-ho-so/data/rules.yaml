@@ -268,6 +268,16 @@ validations:
     condition: null
     needs_llm: true
 
+  # P3.3 — Cross-doc deterministic rule (eval trên `profile`, không phải per-doc).
+  - code: "2.4"
+    category: ho_tich
+    severity: reject
+    applies_to: [_profile]
+    rule: "Năm sinh CỦA BỐ HOẶC MẸ phải nhất quán trên mọi giấy tờ (GKS + CCCD bố/mẹ + GPLX + HĐ tặng đất…)"
+    action: "Nghiêm trọng — yêu cầu xin lại / đối chiếu, có thể lỗi pháp lý ở giấy tờ liên quan"
+    condition: "parent_dob_mismatch(profile)"
+    needs_llm: false
+
   # === KẾT HÔN / LY HÔN ===
   - code: "3.1"
     category: ho_tich
@@ -343,6 +353,16 @@ validations:
     action: "Yêu cầu xin lại nếu giấy cũ quá"
     condition: null
     needs_llm: true
+
+  # P3.3 — Cross-doc deterministic rule (eval trên `profile`).
+  - code: "5.3"
+    category: ho_tich
+    severity: warn
+    applies_to: [_profile]
+    rule: "Mọi con (từ GKS / XN học) phải có tên trong danh sách thanh_vien_ho_khau của XNCT"
+    action: "Cảnh báo + yêu cầu xin lại XNCT đủ thành viên (làm yếu ràng buộc gia đình)"
+    condition: "children_missing_from_xnct(profile)"
+    needs_llm: false
 
   # === LLTP ===
   - code: "6.1"

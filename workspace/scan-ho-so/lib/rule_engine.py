@@ -146,22 +146,118 @@ def _any_in_text(text: Any, items: list | tuple) -> bool:
 
 
 # ============================================================================
+# P3.3 — Cross-doc helpers (eval trên profile, không phải per-doc).
+# ============================================================================
+def _norm_name(s: Any) -> str:
+    """Bỏ dấu + lowercase + dồn space cho so sánh tên VN."""
+    if not isinstance(s, str) or not s:
+        return ""
+    # local strip_diacritics (tránh import sop_naming gây vòng tròn)
+    import unicodedata
+    s = s.replace("đ", "d").replace("Đ", "D")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s.lower().strip())
+
+
+def _dob_signatures(dob_candidates: list) -> set:
+    """Chuẩn hoá list [(value, source)] về set value để so sánh.
+    - DD/MM/YYYY full → giữ full
+    - Chỉ năm (1971) → giữ năm
+    - 2 ứng viên cùng năm nhưng 1 full / 1 năm-only → coi là cùng (không phải mismatch)
+    """
+    sigs: set = set()
+    full_dates: set = set()
+    years: set = set()
+    for item in dob_candidates or []:
+        if isinstance(item, (list, tuple)) and len(item) >= 1:
+            val = str(item[0]).strip()
+        else:
+            val = str(item).strip()
+        # Full DD/MM/YYYY?
+        m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$", val)
+        if m:
+            full_dates.add(val)
+            years.add(m.group(3))
+            continue
+        # YYYY-MM-DD?
+        m = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$", val)
+        if m:
+            full_dates.add(val)
+            years.add(m.group(1))
+            continue
+        # Năm 4 chữ số?
+        if re.match(r"^\d{4}$", val):
+            years.add(val)
+            continue
+        sigs.add(val)   # giữ raw nếu format khác
+    # Mismatch khi có ≥2 năm khác nhau, HOẶC ≥2 full date khác nhau với cùng năm khác nhau.
+    return full_dates | years | sigs
+
+
+def parent_dob_mismatch(profile: Any) -> bool:
+    """True nếu năm sinh của cha HOẶC mẹ trong profile có ≥2 năm khác nhau giữa các giấy tờ.
+    profile = {parents: {cha:{dob_candidates:[(v, src)]}, me:{...}}}."""
+    if not isinstance(profile, dict):
+        return False
+    parents = profile.get("parents") or {}
+    for who in ("cha", "me"):
+        info = parents.get(who) or {}
+        sigs = _dob_signatures(info.get("dob_candidates") or [])
+        # Tách năm từ full date + năm raw — nếu ≥2 năm khác nhau là MISMATCH
+        years_only = set()
+        for s in sigs:
+            m = re.search(r"\b(\d{4})\b", s)
+            if m:
+                y = m.group(1)
+                if 1900 <= int(y) <= 2099:
+                    years_only.add(y)
+        if len(years_only) >= 2:
+            return True
+    return False
+
+
+def children_missing_from_xnct(profile: Any) -> bool:
+    """True nếu có con (children) mà tên KHÔNG xuất hiện trong residence_members của XNCT.
+    profile = {children:[{name,...}], residence_members:[{ho_ten,...}]}."""
+    if not isinstance(profile, dict):
+        return False
+    children = profile.get("children") or []
+    members = profile.get("residence_members") or []
+    if not children:
+        return False
+    if not members:
+        # Không có XNCT (hoặc XNCT trống thanh_vien_ho_khau) → không thể đối chiếu → bỏ qua
+        # (đừng fire false positive). Rule khác sẽ flag "thiếu XNCT".
+        return False
+    mem_norm = {_norm_name(m.get("ho_ten")) for m in members if isinstance(m, dict)}
+    for ch in children:
+        if not isinstance(ch, dict):
+            continue
+        cn = _norm_name(ch.get("name"))
+        if cn and cn not in mem_norm:
+            return True
+    return False
+
+
+# ============================================================================
 # Eval rule condition cho 1 doc
 # ============================================================================
-def evaluate_rule(condition: str, doc: dict) -> bool | None:
-    """Eval `condition` (chuỗi expression Python-like) trên `doc` (dict 1 giấy).
+def evaluate_rule(condition: str, doc: dict | None = None, profile: dict | None = None) -> bool | None:
+    """Eval `condition` (chuỗi expression Python-like) trên `doc` (per-doc rule) hoặc `profile` (cross-doc rule).
     Trả:
       True  → rule vi phạm
       False → rule OK
       None  → không eval được (condition lỗi syntax, dữ liệu thiếu — bỏ qua deterministic, để LLM xử)
-    KHÔNG raise — eval lỗi → trả None để không phá pipeline.
     """
-    if not condition or not isinstance(doc, dict):
+    if not condition:
         return None
-    ctx = _make_doc_context(doc)
+    if doc is None and profile is None:
+        return None
+    ctx = _make_doc_context(doc) if isinstance(doc, dict) else _make_doc_context({})
     se = EvalWithCompoundTypes(
-        # `true`/`false`/`null` cho-phép viết YAML kiểu YAML thay vì kiểu Python `True`/`False`/`None`.
-        names={"doc": ctx, "today": date.today(),
+        names={"doc": ctx, "profile": (profile if isinstance(profile, dict) else {}),
+               "today": date.today(),
                "true": True, "false": False, "null": None,
                "True": True, "False": False, "None": None},
         functions={
@@ -172,6 +268,9 @@ def evaluate_rule(condition: str, doc: dict) -> bool | None:
             "lower":        _lower,
             "contains":     _contains,
             "any_in_text":  _any_in_text,
+            # P3.3 — profile-level helpers
+            "parent_dob_mismatch":       parent_dob_mismatch,
+            "children_missing_from_xnct": children_missing_from_xnct,
         },
     )
     try:
@@ -185,20 +284,33 @@ def evaluate_rule(condition: str, doc: dict) -> bool | None:
         return None
 
 
-def detect_deterministic_errors(rules: list, dataset: list[dict]) -> list[dict]:
+def detect_deterministic_errors(rules: list, dataset: list[dict], profile: dict | None = None) -> list[dict]:
     """Chạy mọi rule có `condition` (KHÔNG `needs_llm`) qua từng doc trong dataset.
+    Profile-level rule (applies_to chứa `_profile`) chỉ eval 1 lần với `profile`.
     Trả list[{code, severity, msg, tag, ten, action}] cho mọi vi phạm phát hiện.
     """
     out: list[dict] = []
     for r in rules:
         if not r.condition or r.needs_llm:
             continue
+        # P3.3 — profile-level rule
+        if r.applies_to and "_profile" in r.applies_to:
+            hit = evaluate_rule(r.condition, profile=profile)
+            if hit is True:
+                out.append({
+                    "code": r.code,
+                    "severity": r.severity,
+                    "msg": r.rule,
+                    "action": r.action,
+                    "tag": "_profile",
+                    "ten": "(toàn case)",
+                })
+            continue
         for doc in dataset:
             tag = doc.get("loai") or doc.get("tag") or ""
-            # Skip nếu rule có applies_to mà doc.tag không thuộc
             if r.applies_to and tag and tag not in r.applies_to:
                 continue
-            hit = evaluate_rule(r.condition, doc)
+            hit = evaluate_rule(r.condition, doc=doc)
             if hit is True:
                 out.append({
                     "code": r.code,

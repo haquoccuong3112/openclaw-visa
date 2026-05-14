@@ -22,6 +22,21 @@ doc_types:
   # HIGH-PRIORITY DISAMBIGUATION (multi-token, phải đặt đầu để không bị "So dat"
   # match trước "So dat NN" hay "DKKD" match trước CCCD)
   # ==========================================================================
+  - tag: Xac nhan DNN
+    folder: Employment
+    description: "Đơn xác nhận đất nông nghiệp (theo NĐ 64/CP) — UBND xã xác nhận hộ có canh tác đất NN. KHÁC `So dat NN` (sổ đỏ đất NN)"
+    patterns:
+      doc_type:
+        - don xac nhan dat nong nghiep
+        - xac nhan co dat nong nghiep
+        - xac nhan canh tac dat nong nghiep
+        - giay xac nhan co dat nong nghiep
+        - 'xn\s*dnn'
+        - 'xac\s*nhan\s*dnn'
+        - xn dat nong nghiep
+      filename: ['xn\s*dnn', 'xac\s*nhan\s*dnn', 'xac\s*nhan\s*dat\s*nong\s*nghiep']
+    in_checklist: [FARM-13-14]
+
   - tag: So dat NN
     folder: Employment
     description: "Sổ đỏ đất NÔNG NGHIỆP (đất canh tác / vườn / ruộng) — dùng chứng minh nghề nông"
@@ -162,28 +177,83 @@ doc_types:
     in_checklist: [FARM-9, "8.1", "8.2", "8.3"]
 
   - tag: BHXH
-    folder: Personal Docs
-    description: "Biên lai BHXH tự nguyện — 3 tháng gần nhất, có dấu đỏ + chữ ký người thu/nộp"
+    folder: Employment
+    description: "Biên lai BHXH tự nguyện / sổ BHXH — 3 tháng gần nhất, có dấu đỏ + chữ ký người thu/nộp"
     patterns:
-      doc_type: ['\bbhxh\b', bao hiem xa hoi]
+      doc_type: ['\bbhxh\b', bao hiem xa hoi, so bao hiem xa hoi]
       filename: ['\bbhxh\b']
     in_checklist: [FARM-19a, "20.1", "20.2", "20.3", "20.4", "20.5"]
 
   - tag: BHYT
-    folder: Personal Docs
+    folder: Employment
     description: "Biên lai BHYT / thẻ BHYT — còn hiệu lực"
     patterns:
       doc_type: ['\bbhyt\b', bao hiem y te, the bao hiem y te]
       filename: ['\bbhyt\b']
     in_checklist: [FARM-19b, "20.1", "20.2", "20.3", "20.4", "20.5"]
 
+  - tag: Medical
+    folder: Personal Docs
+    description: "Giấy khám sức khoẻ (E-Medical / Medical Information / khám sức khỏe). KHÔNG nhầm với CV/Sơ yếu lý lịch"
+    patterns:
+      doc_type:
+        - kham suc khoe
+        - giay kham suc khoe
+        - e-medical
+        - emedical
+        - medical information
+        - medical info
+        - medical exam
+        - kham benh
+      filename: ['e[-_]?medical', 'medical', 'kham\s*suc\s*khoe']
+    in_checklist: [FARM-20, "10.1", "10.2"]
+
   - tag: IOM
     folder: Personal Docs
-    description: "IOM e-Medical information sheet — giấy khám sức khoẻ tại IOM, còn hạn ≤12 tháng"
+    description: "IOM e-Medical information sheet — khám sức khỏe tại IOM (Tổ chức Di cư Quốc tế), còn hạn ≤12 tháng"
     patterns:
-      doc_type: ['\biom\b']
+      doc_type: ['\biom\b', 'iom medical']
       filename: ['\biom\b']
     in_checklist: [FARM-20, "10.1", "10.2"]
+
+  - tag: SYLL
+    folder: Personal Docs
+    description: "Sơ yếu lý lịch CÓ DẤU MỘC tròn UBND xã/phường (có giá trị pháp lý). Phân biệt với CV (tờ tự khai không dấu)"
+    patterns:
+      doc_type:
+        - so yeu ly lich co dau
+        - so yeu ly lich co xac nhan
+        - syll co dau
+        - so yeu ly lich da xac nhan
+      filename: ['syll', 'so\s*yeu\s*ly\s*lich']
+    in_checklist: [FARM-21, "11.1", "11.2", "11.3"]
+
+  - tag: XN doc than
+    folder: Personal Docs
+    description: "Giấy xác nhận tình trạng hôn nhân (xác nhận ĐỘC THÂN / chưa đăng ký kết hôn). KHÔNG nhầm với GKH (chứng nhận kết hôn)"
+    patterns:
+      doc_type:
+        - xac nhan tinh trang hon nhan
+        - xac nhan doc than
+        - tinh trang hon nhan
+        - chua dang ky ket hon
+        - chua ket hon voi ai
+        - xn doc than
+      filename: ['\bxn\s*doc\s*than\b', 'doc\s*than', 'tinh\s*trang\s*hon\s*nhan']
+    in_checklist: []
+
+  - tag: Trich luc HT
+    folder: Personal Docs
+    description: "Trích lục cải chính / thay đổi hộ tịch — sửa tên, ngày sinh, dân tộc… trên giấy khai sinh"
+    patterns:
+      doc_type:
+        - trich luc cai chinh
+        - trich luc thay doi
+        - cai chinh ho tich
+        - thay doi ho tich
+        - trich luc ho tich
+      filename: ['trich\s*luc', 'cai\s*chinh\s*ho\s*tich']
+    in_checklist: []
 
   - tag: CV
     folder: Personal Docs
@@ -240,9 +310,32 @@ doc_types:
   # ==========================================================================
   # EDUCATION
   # ==========================================================================
+  - tag: Hoc ba
+    folder: Education
+    description: "Học bạ THCS/THPT — danh sách điểm theo môn học, có dấu trường + chữ ký GVCN/Hiệu trưởng"
+    patterns:
+      doc_type: [hoc ba, transcript thpt, transcript thcs, transcript trung hoc, bang diem hoc ba]
+      filename: ['\bhoc\s*ba\b']
+    in_checklist: [FARM-10, "9.1", "9.2", "9.3"]
+
+  - tag: CC tin hoc
+    folder: Education
+    description: "Chứng chỉ tin học / ứng dụng CNTT (MOS, IC3, A/B chuẩn cũ)"
+    patterns:
+      doc_type:
+        - chung chi tin hoc
+        - cc tin hoc
+        - chung chi ung dung cntt
+        - chung chi cntt
+        - mos
+        - 'ic\s*3'
+        - tin hoc van phong
+      filename: ['cc[-_\s]tin[-_\s]hoc', 'chung[-_\s]chi[-_\s]tin[-_\s]hoc', '\bmos\b']
+    in_checklist: []
+
   - tag: Bang cap
     folder: Education
-    description: "Bằng cấp các cấp (cấp 2/3, trung cấp, cao đẳng, đại học) + chứng chỉ nghề/tiếng Anh"
+    description: "Bằng cấp các cấp (cấp 2/3, trung cấp, cao đẳng, đại học) + chứng chỉ nghề/tiếng Anh. Phân cấp qua `extracted.bang_cap_level`"
     patterns:
       doc_type:
         - bang cap
@@ -251,6 +344,10 @@ doc_types:
         - bang dai hoc
         - bang trung cap
         - bang cao dang
+        - bang trung hoc co so
+        - bang trung hoc pho thong
+        - bang thac si
+        - bang tien si
         - diploma
       filename: ['bang\s*cap', 'bang\s*tot\s*nghiep', 'diploma']
     in_checklist: [FARM-10, "9.1", "9.2", "9.3"]
@@ -360,6 +457,21 @@ doc_types:
     patterns:
       doc_type: [hop dong lao dong, hdld, hop dong lam viec]
       filename: ['\bhdld\b', 'hop\s*dong\s*lao\s*dong']
+    in_checklist: []
+
+  - tag: HD thue MB
+    folder: Employment
+    description: "Hợp đồng thuê mặt bằng / thuê nhà / thuê đất kinh doanh"
+    patterns:
+      doc_type:
+        - hop dong thue mat bang
+        - hd thue mat bang
+        - hop dong thue nha
+        - hd thue nha
+        - hop dong thue dat
+        - hop dong thue cua hang
+        - hop dong thue kiot
+      filename: ['hd\s*thue\s*mb', 'hop\s*dong\s*thue']
     in_checklist: []
 
   - tag: Bien lai

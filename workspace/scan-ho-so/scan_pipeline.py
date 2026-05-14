@@ -85,7 +85,12 @@ GEMINI_RESPONSE_SCHEMA = {
         "properties": {
             "doc_type":   {"type": "string"},
             "person":     {"type": "array", "items": {"type": "object",
-                "properties": {"full_name": {"type": "string"}, "date_of_birth": {"type": "string"}},
+                "properties": {
+                    "full_name": {"type": "string"},
+                    "date_of_birth": {"type": "string"},
+                    # P3.1: relation của person này với đương đơn (chỉ điền khi văn bản ghi RÕ).
+                    "relation": {"type": "string"},  # one of: applicant, cha, me, vo, chong, con, anh_chi_em, khac, ""
+                },
                 "additionalProperties": True}},
             "summary_vi": {"type": "string"},
             "key_fields": {"type": "object", "additionalProperties": True},
@@ -212,13 +217,19 @@ Các trường:
     lẻ, thông báo SMS ngân hàng, hay bảng thông tin có vài hàng. Nếu file là 1 TẤM THẺ (visa card / passport /
     CCCD scan) hay 1 trang giấy thông tin → phân theo loại giấy đó (Hộ chiếu / Căn cước / Thẻ tín dụng / …),
     KHÔNG phải "Sao kê ngân hàng".
-- person: [{{"full_name":"...","date_of_birth":"..."}}]
+- person: [{{"full_name":"...","date_of_birth":"...","relation":"..."}}]
+  • relation: quan hệ của người đó với "đương đơn chính" (chủ hồ sơ). 1 trong:
+    "applicant" | "cha" | "me" | "vo" | "chong" | "con" | "anh_chi_em" | "khac" | "".
+  • CHỈ ĐIỀN khi văn bản GHI RÕ chữ "cha/bố/mẹ/vợ/chồng/con" kèm tên đó. KHÔNG SUY DIỄN.
+    "bs" = bản sao (viết tắt), KHÔNG phải họ tên người và KHÔNG phải "bố".
 - summary_vi: tóm tắt 1-2 câu
 - key_fields: {{"số giấy tờ":"...","ngày cấp":"...","nơi cấp":"..."}}
 - extracted: object trích MỌI thông tin nhìn thấy phục vụ kiểm tra hồ sơ; trường nào không có để chuỗi rỗng "" hoặc mảng rỗng []. Chỉ điền cái nào áp dụng với loại giấy này. Các khoá có thể có:
   ho_ten, ngay_sinh, gioi_tinh, quoc_tich, noi_sinh, que_quan, noi_thuong_tru, noi_o_hien_tai,
   so_giay_to, loai_so ("CMND 9 số"|"CCCD 12 số"|"hộ chiếu"|...), ngay_cap, noi_cap, ngay_het_han, co_gia_tri_den,
-  ho_ten_cha, nam_sinh_cha, ho_ten_me, nam_sinh_me, ho_ten_vo_chong, so_cmnd_cu_vo_chong, nguoi_di_khai_sinh,
+  ho_ten_cha, nam_sinh_cha, ngay_sinh_cha (DD/MM/YYYY nếu thấy đầy đủ, nếu chỉ thấy năm thì để rỗng),
+  ho_ten_me, nam_sinh_me, ngay_sinh_me (DD/MM/YYYY tương tự),
+  ho_ten_vo_chong, so_cmnd_cu_vo_chong, nguoi_di_khai_sinh,
   thanh_vien_ho_khau ([{{"ho_ten":"","ngay_sinh":"","so_dinh_danh":"","quan_he_voi_chu_ho":""}}]), giay_co_gia_tri_den,
   chu_tai_khoan, so_tai_khoan_hoac_so, so_tien, ky_han, ngay_dao_han, ngay_xac_nhan_so_du, so_du,
   ky_sao_ke_tu, ky_sao_ke_den, ten_cong_ty, ma_so_bhxh, giai_doan_dong_bhxh, ma_the_bhyt, bhyt_gia_tri_tu, bhyt_gia_tri_den,
@@ -234,7 +245,22 @@ Các trường:
   phong_nen_trang (true nếu phông nền trắng/xanh đơn sắc, đủ sáng; false nếu phông phức tạp/lộn xộn/tối),
 
   // Chỉ điền khi doc_type = "Căn cước công dân" và FILE LÀ MẶT SAU CCCD:
-  co_2_o_van_tay (true nếu mặt sau có ĐỦ 2 ô dấu vân tay rõ — ngón trỏ trái + ngón trỏ phải; false nếu thiếu 1/2 ô, mờ, hoặc trống)
+  co_2_o_van_tay (true nếu mặt sau có ĐỦ 2 ô dấu vân tay rõ — ngón trỏ trái + ngón trỏ phải; false nếu thiếu 1/2 ô, mờ, hoặc trống),
+
+  // Sub-typing — chỉ điền khi loại tương ứng:
+  bang_cap_level (chỉ khi doc_type là bằng cấp; 1 trong: "cap_2"|"cap_3"|"trung_cap"|"cao_dang"|"dai_hoc"|"thac_si"|"tien_si"|"khac"),
+  gplx_hang (chỉ khi GPLX; vd "A1"|"A2"|"B"|"B2"|"C"|"D"|"E"|"FC"),
+  cccd_mat (chỉ khi doc_type là CCCD/CMND; 1 trong "truoc"|"sau"|"2-mat" — file có cả 2 mặt thì "2-mat"),
+  co_dau_xa_phuong (true CHỈ khi đây là Sơ yếu lý lịch / đơn / xác nhận CÓ con dấu mộc tròn của UBND xã/phường — phân biệt với CV viết tay không dấu),
+
+  // MRZ — chỉ điền khi doc_type là CCCD hoặc Hộ chiếu VÀ file có vùng MRZ (3 dòng `<<` dưới đáy CCCD hoặc 2 dòng ở trang dữ liệu hộ chiếu):
+  mrz: {{ "raw":"<2-3 dòng MRZ nguyên văn, mỗi dòng 1 chuỗi>", "name":"<tên parse từ MRZ>", "dob":"<DD/MM/YYYY parse từ MRZ>", "doc_no":"<số giấy tờ parse từ MRZ>" }}
+  ⚠️ MRZ name LÀ GROUND-TRUTH chủ giấy tờ — KHÔNG được dùng tên ngoài MRZ nếu MRZ rõ ràng đọc được.
+
+QUY TẮC CHỐNG SUY DIỄN (BẮT BUỘC):
+- "bs" = "bản sao" (viết tắt thường dùng trên giấy khai sinh bản sao). KHÔNG được dịch thành "ba" / "bố" / coi là họ tên người.
+- KHÔNG được tự chèn "vợ" / "chồng" / "con" / "bố" / "mẹ" vào tên người hoặc relation nếu văn bản KHÔNG ghi rõ chữ đó kèm tên cụ thể.
+- Một CCCD/giấy tờ thuộc về MỘT chủ thể duy nhất — nếu MRZ đọc được, chủ thể = MRZ name; nếu không, chủ thể = họ tên ngay dưới dòng "Họ tên" / "Full name", KHÔNG phải tên người được nhắc tới trong các trường phụ.
 
 VÍ DỤ output (3 case tham khảo — JSON output thực tế phải khớp file thực):
 
@@ -329,16 +355,26 @@ def ocr_prefetch(files: list, *, dry_run: bool, workers: int) -> dict:
     return out
 
 
+def _strip_trailing_year(name: str) -> str:
+    """P2.5 — 'Nguyen Thi Anh 1999' → 'Nguyen Thi Anh'. Áp dụng cho applicant fallback
+    để KHÔNG ép năm sinh vào tên file. Group title (parse_group_title) giữ năm cho
+    case_id, nhưng tên file phải sạch."""
+    if not name:
+        return name
+    return re.sub(r"\s+(?:19|20)\d{2}\s*$", "", name).strip()
+
+
 def subject_from_gemini(gem: dict, fallback: str) -> str:
     person = gem.get("person")
+    name = ""
     if isinstance(person, list) and person:
         p0 = person[0]
-        return (p0.get("full_name") or p0.get("name") or "") if isinstance(p0, dict) else str(p0)
-    if isinstance(person, dict):
-        return person.get("full_name") or person.get("name") or ""
-    if isinstance(person, str):
-        return person
-    return fallback
+        name = (p0.get("full_name") or p0.get("name") or "") if isinstance(p0, dict) else str(p0)
+    elif isinstance(person, dict):
+        name = person.get("full_name") or person.get("name") or ""
+    elif isinstance(person, str):
+        name = person
+    return name or _strip_trailing_year(fallback)
 
 
 # ----------------------------------------------------------------------------
@@ -364,6 +400,10 @@ def dedup_name(name_registry: dict, tag: str, subject_title: str, ext: str,
 # Pass 2: split PDF + full OCR per segment (do caller chạy qua process_one).
 # ============================================================================
 PAGE_CLASSIFY_MODEL = os.environ.get("PAGE_CLASSIFY_MODEL", "google/gemini-2.5-flash")
+# P1.1: escalate model — chạy lại các trang Khac/low-conf để diệt bug "11 trang Passport".
+PAGE_CLASSIFY_PRO_MODEL = os.environ.get("PAGE_CLASSIFY_PRO_MODEL", "google/gemini-2.5-pro")
+# Ngưỡng escalate: nếu ≥30% trang có confidence low → batch escalate qua pro.
+PAGE_CLASSIFY_PRO_RATIO = float(os.environ.get("PAGE_CLASSIFY_PRO_RATIO", "0.30"))
 PAGE_CLASSIFY_SCHEMA = {
     "name": "page_classify",
     "strict": True,
@@ -372,6 +412,7 @@ PAGE_CLASSIFY_SCHEMA = {
         "properties": {
             "doc_type":    {"type": "string"},
             "ten_chu_the": {"type": "string"},
+            "confidence":  {"type": "string"},  # P1.1: high|medium|low
         },
         "required": ["doc_type"],
         "additionalProperties": True,
@@ -407,22 +448,28 @@ def _rasterize_page_to_jpg_b64(path: Path, page_idx: int, dpi: int = 150) -> str
 
 def _gemini_quick_classify_page(img_b64: str, page_no: int,
                                  model: str | None = None) -> dict:
-    """Pass 1 — classify 1 trang ảnh: trả {doc_type, ten_chu_the}. Dùng flash để giữ chính xác page-boundary."""
+    """Pass 1 — classify 1 trang ảnh: trả {doc_type, ten_chu_the, confidence}.
+    P1.1 fix: KHÔNG được trả `doc_type=""`. Khi không chắc → trả `"Khac"` + confidence="low".
+    Caller (`detect_pdf_segments`) sẽ escalate batch Khac/low qua PAGE_CLASSIFY_PRO_MODEL."""
     import httpx
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
-        return {"doc_type": "", "ten_chu_the": ""}
+        return {"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"}
     prompt = (
         f"Đây là TRANG {page_no} của một file PDF có thể gộp nhiều loại giấy tờ visa Canada. "
         "Phân loại CHỈ trang này theo BẢN CHẤT (vd: 'Căn cước công dân' / 'Hộ chiếu' / "
         "'Trích lục khai sinh' / 'Giấy đăng ký kết hôn' / 'Quyết định ly hôn' / "
         "'Giấy chứng nhận quyền sử dụng đất' / 'Hợp đồng cho tặng đất' / 'Bằng cấp' / "
+        "'Học bạ' / 'Chứng chỉ tin học' / 'Trích lục cải chính hộ tịch' / "
         "'Chứng nhận đăng ký xe' / 'Chứng nhận hiến máu' / 'Sao kê ngân hàng' / 'Sổ tiết kiệm' / "
-        "'Hợp đồng lao động' / 'Đăng ký kinh doanh' / 'BHYT' / 'BHXH' / 'Lý lịch tư pháp' / "
-        "'Xác nhận cư trú' / 'Giấy xác nhận học sinh' / 'Ảnh thẻ' / 'Ảnh gia đình' / 'Khác'). "
-        'Trả JSON 1 dòng: {"doc_type":"<loại>","ten_chu_the":"<họ tên người trên giấy đó nếu thấy>"}. '
-        "Nếu trang là continuation của giấy ở trang trước (cùng loại, cùng người) → trả loại + tên đó. "
-        "Nếu trang trắng / không có nội dung rõ → doc_type rỗng."
+        "'Xác nhận số dư' / 'Hợp đồng lao động' / 'Hợp đồng thuê mặt bằng' / "
+        "'Đăng ký kinh doanh' / 'BHYT' / 'BHXH' / 'Lý lịch tư pháp' / "
+        "'Xác nhận cư trú' / 'Xác nhận tình trạng hôn nhân' / 'Xác nhận đất nông nghiệp' / "
+        "'Giấy xác nhận học sinh' / 'Sơ yếu lý lịch' / 'Khám sức khỏe' / "
+        "'Ảnh thẻ' / 'Ảnh gia đình' / 'Khac'). "
+        'Trả JSON 1 dòng: {"doc_type":"<loại>","ten_chu_the":"<họ tên người trên giấy đó nếu thấy>","confidence":"high|medium|low"}. '
+        "Nếu trang là continuation của giấy ở trang trước (cùng loại, cùng người) → trả loại + tên đó + confidence=high. "
+        "⚠️ KHÔNG được trả doc_type rỗng. Khi không chắc / trang trắng / mờ → trả doc_type='Khac' + confidence='low'."
     )
     payload = {
         "model": model or PAGE_CLASSIFY_MODEL,
@@ -451,11 +498,17 @@ def _gemini_quick_classify_page(img_b64: str, page_no: int,
     try:
         d = json.loads(text)
         if isinstance(d, dict):
-            return {"doc_type": str(d.get("doc_type", "")).strip(),
-                    "ten_chu_the": str(d.get("ten_chu_the", "")).strip()}
+            dt = str(d.get("doc_type", "")).strip() or "Khac"   # P1.1: rỗng → Khac
+            conf = str(d.get("confidence", "")).strip().lower()
+            if conf not in ("high", "medium", "low"):
+                # Suy ra confidence: nếu Khac → low; nếu rõ loại → medium (flash dùng medium default).
+                conf = "low" if dt.lower() == "khac" else "medium"
+            return {"doc_type": dt,
+                    "ten_chu_the": str(d.get("ten_chu_the", "")).strip(),
+                    "confidence": conf}
     except Exception:  # noqa: BLE001
         pass
-    return {"doc_type": "", "ten_chu_the": ""}
+    return {"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"}
 
 
 def _names_clearly_differ(a: str, b: str) -> bool:
@@ -494,34 +547,36 @@ def _group_consecutive(pages_class: list[dict]) -> list[dict]:
     """Gom các trang liên tiếp cùng doc_type → segment. Cắt khi:
     - doc_type khác (loại giấy đổi)
     - HOẶC cùng doc_type nhưng `ten_chu_the` rõ ràng KHÁC NGƯỜI (vd 1 PDF gộp CCCD KH +
-      CCCD bố mẹ — cùng tag CCCD nhưng khác họ → phải split để tránh sidecar trộn dữ liệu)."""
+      CCCD bố mẹ — cùng tag CCCD nhưng khác họ → phải split để tránh sidecar trộn dữ liệu).
+
+    P1.1 fix: page với doc_type="Khac" KHÔNG còn được xem là continuation. Mỗi run trang
+    Khac liên tiếp trở thành 1 segment riêng — caller sẽ escalate qua pro model để xác định
+    đúng loại. Cách này phá bug "11 trang Passport gộp tất cả CCCD/sổ đất/khai sinh"."""
     if not pages_class:
         return []
     def _dt(p: dict) -> str:
         return (p.get("doc_type") or "").strip().lower()
     segments: list[dict] = []
-    cur_dt = _dt(pages_class[0])
+    cur_dt = _dt(pages_class[0]) or "khac"   # P1.1: safety
     cur_name = (pages_class[0].get("ten_chu_the") or "").strip()
     cur_start = 1
     for i, p in enumerate(pages_class[1:], start=2):
-        k = _dt(p)
+        k = _dt(p) or "khac"
         nm = (p.get("ten_chu_the") or "").strip()
-        # Trang doc_type rỗng → continuation (Gemini không chắc → đừng split lẻ)
-        # Trang khác doc_type → split.
-        # Cùng doc_type nhưng khác NGƯỜI rõ ràng → split (bug fix: CCCD đa người trong 1 PDF).
-        diff_type = bool(k) and k != cur_dt
-        diff_person = bool(k) and k == cur_dt and _names_clearly_differ(cur_name, nm)
+        # P1.1: bất kỳ thay đổi doc_type nào (kể cả vào/ra "khac") đều split.
+        diff_type = k != cur_dt
+        diff_person = k == cur_dt and k not in ("khac", "") and _names_clearly_differ(cur_name, nm)
         if diff_type or diff_person:
             seed = pages_class[cur_start - 1]
             segments.append({"tu_trang": cur_start, "den_trang": i - 1,
-                             "doc_type": seed.get("doc_type", ""),
+                             "doc_type": seed.get("doc_type", "") or "Khac",
                              "ten_chu_the": seed.get("ten_chu_the", "")})
             cur_dt = k
             cur_name = nm
             cur_start = i
     seed = pages_class[cur_start - 1]
     segments.append({"tu_trang": cur_start, "den_trang": len(pages_class),
-                     "doc_type": seed.get("doc_type", ""),
+                     "doc_type": seed.get("doc_type", "") or "Khac",
                      "ten_chu_the": seed.get("ten_chu_the", "")})
     return segments
 
@@ -542,19 +597,51 @@ def _split_pdf_pages(path: Path, tu_trang: int, den_trang: int) -> Path:
 
 def detect_pdf_segments(path: Path) -> list[dict]:
     """Pass 1: classify từng trang của PDF nhiều trang → trả list segments.
-    Nếu PDF ≤1 trang hoặc chỉ 1 segment (file đơn doc): trả [] (caller dùng single-doc flow)."""
+    Nếu PDF ≤1 trang hoặc chỉ 1 segment (file đơn doc): trả [] (caller dùng single-doc flow).
+
+    P1.1: nếu ≥30% trang ra "Khac"/low-conf, escalate những trang đó qua
+    PAGE_CLASSIFY_PRO_MODEL (gemini-2.5-pro 1 batch) để re-classify. Diệt bug
+    "11 trang gộp Passport" khi Flash bị choke ở giữa file đa loại."""
     n_pages = _count_pdf_pages(path)
     if n_pages <= 1:
         return []
-    pages_class = []
+    # Rasterize 1 lần, dùng lại nếu phải escalate.
+    rendered: list[str | None] = []
     for i in range(n_pages):
         try:
-            img_b64 = _rasterize_page_to_jpg_b64(path, i)
+            rendered.append(_rasterize_page_to_jpg_b64(path, i))
+        except Exception as e:  # noqa: BLE001
+            log(f"  rasterize lỗi page={i+1}: {type(e).__name__}: {e}")
+            rendered.append(None)
+    pages_class: list[dict] = []
+    for i in range(n_pages):
+        img_b64 = rendered[i]
+        if img_b64 is None:
+            pages_class.append({"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"})
+            continue
+        try:
             c = _gemini_quick_classify_page(img_b64, page_no=i + 1)
         except Exception as e:  # noqa: BLE001
             log(f"  page-classify lỗi page={i+1}: {type(e).__name__}: {e}")
-            c = {"doc_type": "", "ten_chu_the": ""}
+            c = {"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"}
         pages_class.append(c)
+
+    # P1.1 escalation: re-classify trang Khac / low qua pro model.
+    low_idx = [i for i, p in enumerate(pages_class)
+               if (p.get("doc_type") or "").strip().lower() in ("khac", "") or p.get("confidence") == "low"]
+    if low_idx and len(low_idx) >= max(2, int(n_pages * PAGE_CLASSIFY_PRO_RATIO)):
+        log(f"  page-classify escalate: {len(low_idx)}/{n_pages} trang low-conf → {PAGE_CLASSIFY_PRO_MODEL}")
+        for i in low_idx:
+            if rendered[i] is None:
+                continue
+            try:
+                c = _gemini_quick_classify_page(rendered[i], page_no=i + 1, model=PAGE_CLASSIFY_PRO_MODEL)
+                # Chỉ overwrite nếu pro cho confidence ≥ medium (tránh thay Khac/low bằng Khac/low khác)
+                if c.get("confidence") in ("high", "medium") and (c.get("doc_type") or "").strip().lower() not in ("", "khac"):
+                    pages_class[i] = c
+            except Exception as e:  # noqa: BLE001
+                log(f"  page-classify pro lỗi page={i+1}: {type(e).__name__}: {e}")
+
     segments = _group_consecutive(pages_class)
     return segments if len(segments) >= 2 else []
 
@@ -595,19 +682,84 @@ def _find_sidecar_by_hash(case_folder_id: str, content_hash: str) -> dict | None
 
 
 # ============================================================================
+# P1.4 — sweep stray .md / .json metadata sidecars khỏi 4 folder khách.
+# Staff báo Vang.jpg trong Asset có Vang 2.md, Vang 4.json bên cạnh — đó là sidecar
+# bị upload lạc folder (có thể remnant từ version cũ, hoặc cache Drive trả nhầm id).
+# Sweeper scan Asset/Employment/Education/Personal Docs, move mọi .md/.json về
+# _Bot OCR & Metadata. Idempotent: nếu cùng tên đã có trong meta folder → suffix _dup<ts>.
+# ============================================================================
+def sweep_stray_sidecars(case_folder_id: str) -> dict:
+    """Trả {moved: int, skipped: int, errors: int, by_folder: {folder: count}}."""
+    out = {"moved": 0, "skipped": 0, "errors": 0, "by_folder": {}}
+    if not case_folder_id:
+        return out
+    try:
+        from lib.drive_helpers import (get_or_create_folder, list_folder,
+                                       rename_file, move_file, find_file_by_name)
+    except Exception as e:  # noqa: BLE001
+        log(f"  sweep_stray_sidecars: import drive_helpers lỗi: {e}")
+        out["errors"] += 1
+        return out
+    try:
+        meta_id = get_or_create_folder(OCR_META_FOLDER, case_folder_id, drive_id=SHARED_DRIVE_ID)
+        existing_meta = list_folder(meta_id, drive_id=SHARED_DRIVE_ID)
+    except Exception as e:  # noqa: BLE001
+        log(f"  sweep_stray_sidecars: không truy cập được {OCR_META_FOLDER}: {e}")
+        out["errors"] += 1
+        return out
+    for top in TOP_FOLDERS:
+        try:
+            top_id = get_or_create_folder(top, case_folder_id, drive_id=SHARED_DRIVE_ID)
+            files = list_folder(top_id, drive_id=SHARED_DRIVE_ID)
+        except Exception as e:  # noqa: BLE001
+            log(f"  sweep_stray_sidecars: skip folder {top}: {e}")
+            out["errors"] += 1
+            continue
+        for name, fid in files.items():
+            low = name.lower()
+            if not (low.endswith(".md") or low.endswith(".json")):
+                continue
+            # Đây là sidecar lạc folder — move về meta folder.
+            target_name = name
+            if name in existing_meta:
+                ts = time.strftime("%Y%m%d-%H%M%S")
+                stem, _, ext = name.rpartition(".")
+                target_name = f"{stem}_dup{ts}.{ext}"
+                try:
+                    rename_file(fid, target_name, drive_id=SHARED_DRIVE_ID)
+                except Exception as e:  # noqa: BLE001
+                    log(f"  sweep: rename {name!r} → {target_name!r} lỗi: {e}")
+                    out["errors"] += 1
+                    continue
+            try:
+                move_file(fid, meta_id, drive_id=SHARED_DRIVE_ID)
+                out["moved"] += 1
+                out["by_folder"][top] = out["by_folder"].get(top, 0) + 1
+                existing_meta[target_name] = fid   # update cache trong loop
+                log(f"  sweep: moved {top}/{name!r} → {OCR_META_FOLDER}/{target_name!r}")
+            except Exception as e:  # noqa: BLE001
+                log(f"  sweep: move {name!r} lỗi: {e}")
+                out["errors"] += 1
+    if out["moved"] or out["errors"]:
+        log(f"  sweep_stray_sidecars done: moved={out['moved']} errors={out['errors']} by_folder={out['by_folder']}")
+    return out
+
+
+# ============================================================================
 # process one file (with retries)
 # ============================================================================
 def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: str,
                 case_id: str, retries: int, dry_run: bool, sop, name_registry: dict,
-                prefetched_gem: dict | None = None) -> dict:
+                prefetched_gem: dict | None = None, force_rescan: bool = False) -> dict:
     classify_doc_type, build_filename, detect_english, title_case_ascii = sop
     ext = path.suffix.lower()
     can_ocr = ext in OCR_EXT_MIME
     mime = OCR_EXT_MIME.get(ext) or OTHER_EXT_MIME.get(ext) or "application/octet-stream"
 
     # Fix 7 — hash dedup: tính SHA-1 1 lần; nếu sidecar có hash khớp → skip upload, ko OCR lại.
+    # P1.3 — `force_rescan` bypass dedup (cho /oldfile): bot re-OCR + re-classify, upload bản tên đúng.
     content_hash = hashlib.sha1(path.read_bytes()).hexdigest() if not dry_run else ""
-    if content_hash and case_folder_id and not dry_run:
+    if content_hash and case_folder_id and not dry_run and not force_rescan:
         existing = _find_sidecar_by_hash(case_folder_id, content_hash)
         if existing:
             log(f"  {src_name} → duplicate-by-hash (đã có {existing.get('new_name')!r}, skip upload)")
@@ -650,10 +802,10 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
             raw_dt = gem.get("doc_type", "")
             summary = str(gem.get("summary_vi", ""))[:400]
             cls = classify_doc_type(raw_dt, summary, src_name, extracted=gem.get("extracted"))
-            # Fix 6 — escalate "Khac+low-conf" lên gemini-2.5-pro (1 call) để cứu file mơ hồ.
-            # Chỉ chạy khi can_ocr + not dry_run + lần đầu (attempt 1) → tránh re-escalate trên retry upload-only.
-            if can_ocr and not dry_run and attempt == 1 \
-                    and cls.confidence == "low" and cls.tag == "Khac":
+            # P2.2 — escalate mọi file rơi về `Khac` (bất kể confidence) lên gemini-2.5-pro 1 call.
+            # Trước chỉ escalate "Khac+low". Mở rộng vì user feedback: nhiều file Medical/XNCT/HĐ
+            # bị Pass 4 bắt nhầm thành Khac với confidence=low — escalate-all diệt CV/Khac mặc định.
+            if can_ocr and not dry_run and attempt == 1 and cls.tag == "Khac":
                 try:
                     gem2 = gemini_classify_file(path, src_name, model="google/gemini-2.5-pro")
                     if isinstance(gem2, dict):
@@ -670,12 +822,36 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
                 except Exception as e:  # noqa: BLE001
                     log(f"  {src_name}: escalation failed ({type(e).__name__}: {e})")
             needs_review = cls.needs_review or (not can_ocr)
-            subject_raw = subject_from_gemini(gem, applicant) or applicant
+            # P2.5 — `applicant` từ group_registry có thể kèm năm sinh ("Nguyen Thi Anh 1999").
+            # Tên file phải sạch — strip năm trước khi dùng làm subject fallback.
+            subject_raw = subject_from_gemini(gem, applicant) or _strip_trailing_year(applicant)
+            # P2.3 — MRZ override: với CCCD / Passport, nếu OCR thấy MRZ → tên parse từ MRZ
+            # là GROUND TRUTH chủ thẻ. Diệt bug "stamp tên đương đơn lên CCCD người khác".
+            if cls.tag in ("CCCD", "Passport") and isinstance(gem.get("extracted"), dict):
+                _mrz = gem["extracted"].get("mrz")
+                if isinstance(_mrz, dict) and _mrz.get("name"):
+                    _mrz_name = str(_mrz.get("name") or "").strip()
+                    if _mrz_name and len(_mrz_name) >= 4:
+                        subject_raw = _mrz_name
+                else:
+                    # Fallback: Gemini có thể không fill `mrz` dict nhưng đưa cụm MRZ vào summary/raw text.
+                    # Thử parse từ summary để bắt trường hợp này.
+                    try:
+                        from lib.mrz import parse_mrz
+                        _mrz_fallback = parse_mrz(str(gem.get("summary_vi") or "") + "\n" +
+                                                   "\n".join(str(v) for v in (gem.get("extracted") or {}).values()
+                                                            if isinstance(v, str)))
+                        if _mrz_fallback and _mrz_fallback.get("name"):
+                            subject_raw = _mrz_fallback["name"]
+                            gem.setdefault("extracted", {})["mrz"] = _mrz_fallback
+                    except Exception:  # noqa: BLE001
+                        pass
             subject_title = title_case_ascii(subject_raw) or "Unknown"
             is_eng = detect_english(summary, "")
-            # Quan hệ với đương đơn (chỉ trả không-None khi subject ≠ applicant + summary có từ khoá relation).
+            # Quan hệ với đương đơn — P2.4 siết: whitelist doc_tag + ground truth từ extracted.
             from lib.sop_naming import extract_relation
-            relation = extract_relation(applicant, subject_title, summary)
+            relation = extract_relation(applicant, subject_title, summary,
+                                         doc_tag=cls.tag, extracted=gem.get("extracted"))
             # Only the first retry attempt may consume a registry slot per file;
             # build it once on attempt 1 and reuse it on later attempts.
             if attempt == 1 or "new_name" not in locals():
@@ -819,19 +995,22 @@ def run_self_test() -> int:
     assert callable(_find_sidecar_by_hash)
     assert _find_sidecar_by_hash("", "abc") is None
     assert _find_sidecar_by_hash("nonexistent-folder", "") is None
-    # Fix 5 — _group_consecutive: gom trang cùng doc_type, KHÔNG split khi trang doc_type rỗng
+    # P1.1 — _group_consecutive: trang doc_type "" / "Khac" KHÔNG còn coi là continuation.
+    # Mỗi run pages "Khac" → segment riêng để caller (detect_pdf_segments) escalate qua pro model.
+    # Diệt bug "11 trang Passport gộp cả CCCD/sổ đất khi Flash trả rỗng pages 3-11".
     g = _group_consecutive([
         {"doc_type": "CCCD", "ten_chu_the": "A"},
         {"doc_type": "CCCD", "ten_chu_the": "A"},
         {"doc_type": "Bằng cấp", "ten_chu_the": "A"},
         {"doc_type": "Bằng cấp", "ten_chu_the": "A"},
-        {"doc_type": "", "ten_chu_the": ""},                # trang trắng → continuation
+        {"doc_type": "", "ten_chu_the": ""},                # trang trắng → segment Khac riêng
         {"doc_type": "Trích lục khai sinh", "ten_chu_the": "B"},
     ])
-    assert len(g) == 3, g
+    assert len(g) == 4, g    # P1.1 fix: 4 segments (CCCD/Bang/Khac/Trich luc)
     assert g[0]["tu_trang"] == 1 and g[0]["den_trang"] == 2 and g[0]["doc_type"] == "CCCD"
-    assert g[1]["tu_trang"] == 3 and g[1]["den_trang"] == 5 and g[1]["doc_type"] == "Bằng cấp"
-    assert g[2]["tu_trang"] == 6 and g[2]["den_trang"] == 6
+    assert g[1]["tu_trang"] == 3 and g[1]["den_trang"] == 4 and g[1]["doc_type"] == "Bằng cấp"
+    assert g[2]["tu_trang"] == 5 and g[2]["den_trang"] == 5 and g[2]["doc_type"] == "Khac"
+    assert g[3]["tu_trang"] == 6 and g[3]["den_trang"] == 6 and g[3]["doc_type"] == "Trích lục khai sinh"
     # 1 doc duy nhất → 1 segment
     g1 = _group_consecutive([{"doc_type": "CCCD"}] * 5)
     assert len(g1) == 1 and g1[0]["den_trang"] == 5
@@ -919,6 +1098,13 @@ def main(argv=None) -> int:
     ap.add_argument("--no-checklist", action="store_true", help="Skip the AI-checklist cross-check step")
     ap.add_argument("--checklist-only", action="store_true",
                     help="Skip enumerate/OCR/upload; only (re)run the AI checklist for the case (input not required)")
+    # P1.3 — force re-OCR ngay cả khi content_hash đã có sidecar. Dùng cho /oldfile khi staff
+    # nghi file cũ bị nhầm tên — bot sẽ chạy lại classifier (đã update với P2.x) và upload
+    # bản tên đúng. File tên sai cũ vẫn còn trên Drive (staff dọn thủ công).
+    ap.add_argument("--force-rescan", action="store_true",
+                    help="Bypass hash-dedup; OCR + classify lại mọi file (dùng cho /oldfile re-run sau khi update classifier).")
+    ap.add_argument("--sweep-meta", action="store_true",
+                    help="Trước khi xử lý batch, dọn mọi file .md/.json lạc trong 4 folder khách → _Bot OCR & Metadata.")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -976,6 +1162,14 @@ def main(argv=None) -> int:
             if total == 0:
                 log("nothing to do")
 
+        # P1.4 — dọn sidecar lạc khỏi folder khách TRƯỚC khi xử lý (để báo cáo đếm đúng).
+        # Triggered bởi --sweep-meta (telegram_listener.py truyền cho /check + /oldfile).
+        if args.sweep_meta and case_folder_id and not args.dry_run:
+            try:
+                sweep_stray_sidecars(case_folder_id)
+            except Exception as e:  # noqa: BLE001
+                log(f"sweep_stray_sidecars failed (bỏ qua): {type(e).__name__}: {e}")
+
         # OCR mọi file OCR-được ĐỒNG THỜI trước (Gemini call/file là độc lập); phần dưới (phân loại + upload + sidecar) vẫn tuần tự.
         ocr_cache = ocr_prefetch(files, dry_run=args.dry_run, workers=OCR_WORKERS) if files else {}
 
@@ -1006,7 +1200,8 @@ def main(argv=None) -> int:
                         seg_it = process_one(seg_path, seg_src,
                                              case_folder_id=case_folder_id or "", applicant=applicant,
                                              case_id=case_id, retries=args.retries, dry_run=args.dry_run,
-                                             sop=sop, name_registry=name_registry, prefetched_gem=None)
+                                             sop=sop, name_registry=name_registry, prefetched_gem=None,
+                                             force_rescan=args.force_rescan)
                     finally:
                         try:
                             seg_path.unlink(missing_ok=True)
@@ -1025,14 +1220,24 @@ def main(argv=None) -> int:
             # Single-doc path (default)
             it = process_one(path, src_name, case_folder_id=case_folder_id or "", applicant=applicant,
                              case_id=case_id, retries=args.retries, dry_run=args.dry_run, sop=sop,
-                             name_registry=name_registry, prefetched_gem=ocr_cache.get(src_name))
+                             name_registry=name_registry, prefetched_gem=ocr_cache.get(src_name),
+                             force_rescan=args.force_rescan)
             status = it.get("status", "?")
             log(f"     -> {status}  {it.get('new_name', '')}")
             items.append(it)
 
-        n = {"uploaded": 0, "uploaded-no-ocr": 0, "duplicate": 0, "failed": 0, "dry-run": 0}
+        n = {"uploaded": 0, "uploaded-no-ocr": 0, "uploaded-split": 0,
+             "duplicate": 0, "duplicate-by-hash": 0, "failed": 0, "dry-run": 0}
         for it in items:
             n[it.get("status", "failed")] = n.get(it.get("status", "failed"), 0) + 1
+        # P1.2 — reconciliation: file đầu vào nào không có item trong manifest = bị mất.
+        # Cũ: assert hard-crash. Mới: soft warning + ghi vào manifest["dropped_files"]
+        # + exit code 2 để telegram_listener cảnh báo Telegram Pro group.
+        all_input_names = {src_name for (_, src_name) in files}
+        unique_sources = {it.get("split_from") or it.get("src_name") for it in items if it.get("src_name") or it.get("split_from")}
+        dropped_files = sorted(all_input_names - unique_sources)
+        if dropped_files:
+            log(f"⚠️ RECONCILIATION: {len(dropped_files)} file đầu vào không có trong manifest: {dropped_files}")
         manifest = {
             "input": str(in_path) if in_path else None,
             "case_folder_id": case_folder_id,
@@ -1040,8 +1245,11 @@ def main(argv=None) -> int:
             "applicant": applicant,
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "total_input_files": total,
+            "total_output_items": len(items),
+            "unique_sources_covered": len(unique_sources),
             "counts": n,
-            "ok": n["failed"] == 0,
+            "dropped_files": dropped_files,    # P1.2: list tên file bị mất (rỗng nếu OK)
+            "ok": n["failed"] == 0 and not dropped_files,
             "items": items,
         }
 
@@ -1143,16 +1351,21 @@ def main(argv=None) -> int:
             for it in items:
                 if it.get("status") == "failed":
                     print(f"  - {it['src_name']}: {it.get('error')}")
+        # P1.2: in danh sách file bị mất (silent drop) — staff cần biết để gửi lại
+        if dropped_files:
+            print(f"\n⚠️ DROPPED FILES ({len(dropped_files)}) — không có trong manifest:")
+            for nm in dropped_files:
+                print(f"  - {nm}")
         review = [it for it in items if it.get("needs_review")]
         if review and not args.dry_run:
             print(f"\nNEEDS REVIEW ({len(review)}): " + ", ".join(it["src_name"] for it in review))
-        # reconciliation guarantee: every input file is accounted for in the manifest
-        # (multi-doc PDF được split → nhiều item nhưng `split_from` chỉ về cùng input gốc)
-        unique_sources = {it.get("split_from") or it.get("src_name") for it in items}
-        assert len(unique_sources) == total, (
-            f"manifest covers {len(unique_sources)} unique source(s) but {total} input files (BUG)"
-        )
         print("=" * 60)
+        # P1.2 exit code semantics:
+        #   0 = success (no failed, no dropped)
+        #   1 = some files failed (retry-able)
+        #   2 = silent drop detected (manifest hụt file đầu vào) — Telegram listener cảnh báo
+        if dropped_files:
+            return 2
         return 0 if n["failed"] == 0 else 1
     except Exception:  # noqa: BLE001
         traceback.print_exc()

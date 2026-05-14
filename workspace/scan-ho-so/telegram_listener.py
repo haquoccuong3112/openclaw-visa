@@ -720,12 +720,16 @@ ACCEPTED_EXTS = (
 )
 
 
-async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checklist_only: bool = False):
+async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checklist_only: bool = False,
+                            force_rescan: bool = False, sweep_meta: bool = False):
     """Run scan_pipeline.py; return the manifest dict.
 
     Normal mode: process input_path (.zip / dir / file) then run the AI checklist.
     checklist_only=True: skip OCR/upload, only (re)run the checklist for the case
       (input_path is ignored / may be None) — used by the /check command.
+    force_rescan=True: bypass hash-dedup so OCR runs lại — dùng cho /oldfile khi cần
+      bot reclassify file cũ với rule mới (P1.3).
+    sweep_meta=True: trước khi xử lý, dọn .md/.json lạc khỏi 4 folder khách (P1.4).
 
     Serialized per case (case_key) so one case is never processed concurrently;
     different cases run in parallel up to SCAN_RUN_CONCURRENCY. In normal mode
@@ -748,6 +752,10 @@ async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checkl
             else:
                 cmd.append(str(input_path))
             cmd += ["--from-registry", str(chat_id), "--manifest", str(man_path)]
+            if force_rescan:
+                cmd.append("--force-rescan")
+            if sweep_meta:
+                cmd.append("--sweep-meta")
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 env=os.environ.copy(),
@@ -806,12 +814,23 @@ def summarize_manifest(m: dict, drive_link: str = "") -> str:
     dup = c.get("duplicate", 0)
     dup_hash = c.get("duplicate-by-hash", 0)
     failed = c.get("failed", 0)
+    dropped = list(m.get("dropped_files", []) or [])   # P1.2: file đầu vào bị mất
+    n_out = m.get("total_output_items", len(items))
     review = [it for it in items if it.get("needs_review")]
     lines: list[str] = []
-    if failed == 0:
+    if failed == 0 and not dropped:
         lines.append(html.escape(f"✅ Đã xử lý {total} file"))
     else:
-        lines.append(html.escape(f"⚠️ Đã xử lý {total - failed}/{total} file — {failed} file LỖI, sẽ chạy lại"))
+        lines.append(html.escape(f"⚠️ Đã xử lý {total - failed - len(dropped)}/{total} file — "
+                                 f"{failed} LỖI, {len(dropped)} BỊ MẤT"))
+    # P1.2 — dòng đối chiếu input vs output: staff luôn thấy con số.
+    lines.append(html.escape(f"📥 Nhận: {total} · 📤 Xuất: {n_out} item ({n_out - split_n} file gốc + {split_n} tách)") if split_n else
+                 html.escape(f"📥 Nhận: {total} · 📤 Xuất: {n_out} file"))
+    if dropped:
+        lines.append(html.escape(f"⛔ {len(dropped)} FILE BỊ MẤT (không có trong manifest): ")
+                     + ", ".join(html.escape(nm) for nm in dropped[:20])
+                     + (html.escape(f" … (+{len(dropped)-20} nữa)") if len(dropped) > 20 else "")
+                     + html.escape("  — vui lòng gửi lại cho bot."))
     if review:
         lines.append(f"⚠️ <b>{len(review)} file cần kiểm tra thủ công</b> — danh sách bên dưới có icon ⚠️.")
     if split_n:
@@ -1088,7 +1107,9 @@ async def on_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
     try:
-        manifest = await run_scan_pipeline(None, chat_id, case_key=info.get("folder_id", ""), checklist_only=True)
+        # P1.4 — sweep_meta=True ở /check: dọn sidecar lạc trong folder khách trước khi thẩm định.
+        manifest = await run_scan_pipeline(None, chat_id, case_key=info.get("folder_id", ""),
+                                            checklist_only=True, sweep_meta=True)
     except Exception as e:  # noqa: BLE001
         logger.error(f"/check failed for {chat_id}: {e}", exc_info=True)
         await context.bot.send_message(chat_id=int(chat_id), text=f"❌ Lỗi khi đối chiếu: {e}")
@@ -1202,7 +1223,10 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             _expand_zips_in_dir(workdir)
 
-            manifest = await run_scan_pipeline(workdir, chat_id, case_key=folder_id)
+            # P1.3+P1.4 — /oldfile: force_rescan + sweep_meta để bot reclassify file cũ
+            # với rule mới + dọn sidecar lạc trong folder khách trước khi xử lý.
+            manifest = await run_scan_pipeline(workdir, chat_id, case_key=folder_id,
+                                                force_rescan=True, sweep_meta=True)
             try:
                 chatmod.invalidate_case_cache(folder_id)
             except Exception:
@@ -1228,7 +1252,17 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"/oldfile checklist detail send failed: {e}")
 
-            # Move các file gốc trong Old File → Old File/_processed (chỉ chạy khi manifest có items).
+            # P1.3 — chỉ move file ĐÃ XỬ LÝ THÀNH CÔNG sang _processed. File `failed`
+            # và file silent-drop để nguyên trong Old File để staff thấy + retry.
+            # Trước: vòng lặp move tất cả → file lỗi cũng "biến mất" khỏi Old File.
+            processed_src_names: set[str] = set()
+            for it in manifest.get("items", []) or []:
+                st = it.get("status", "")
+                if st in ("uploaded", "uploaded-no-ocr", "uploaded-split", "duplicate", "duplicate-by-hash"):
+                    if it.get("src_name"):
+                        processed_src_names.add(it["src_name"])
+                    if it.get("split_from"):
+                        processed_src_names.add(it["split_from"])
             try:
                 processed_id = get_or_create_folder(OLD_FILE_PROCESSED, old_file_id, drive_id=SHARED_DRIVE_ID)
             except Exception as e:  # noqa: BLE001
@@ -1236,13 +1270,27 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 processed_id = None
             if processed_id:
                 moved = 0
-                for drive_name, drive_fid, _local in downloaded:
+                kept = 0
+                for drive_name, drive_fid, local in downloaded:
+                    # Local có thể là tên zip → các file giải nén; manifest dùng tên file gốc trong zip.
+                    # Match an toàn: nếu drive_name HOẶC local có trong processed_src_names → move.
+                    src_match = drive_name in processed_src_names or local in processed_src_names
+                    if not src_match:
+                        # Kiểm tra thêm fuzzy: zip giải nén có thể có prefix "001_..."
+                        for nm in processed_src_names:
+                            if nm and (local.endswith(nm) or drive_name.endswith(nm)):
+                                src_match = True
+                                break
+                    if not src_match:
+                        kept += 1
+                        logger.info(f"/oldfile giữ {drive_name!r} trong Old File (chưa xử lý xong)")
+                        continue
                     try:
                         move_file(drive_fid, processed_id, drive_id=SHARED_DRIVE_ID)
                         moved += 1
                     except Exception as e:  # noqa: BLE001
                         logger.warning(f"/oldfile move {drive_name!r} ({drive_fid}) → _processed failed: {e}")
-                logger.info(f"/oldfile moved {moved}/{len(downloaded)} file vào _processed")
+                logger.info(f"/oldfile moved {moved}/{len(downloaded)} file vào _processed (giữ lại {kept} file)")
 
             c = manifest.get("counts", {}) or {}
             logger.info(f"OLDFILE pro_chat={chat_id} case={applicant!r} "

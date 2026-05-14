@@ -117,13 +117,24 @@ def _provinces_text() -> str:
 # dataset: gom toàn bộ sidecar .json của case
 # ===========================================================================
 def build_dataset(case_folder_id: str, drive_id: str | None = None) -> list[dict]:
-    """Đọc mọi sidecar `*.json` trong `_Bot OCR & Metadata` của case → list dict mô tả từng giấy tờ."""
+    """Đọc mọi sidecar `*.json` trong `_Bot OCR & Metadata` của case → list dict mô tả từng giấy tờ.
+
+    P3.4 — dedup theo `content_hash`: nếu 2 sidecar cùng hash (do remnant từ lần quét cũ
+    hoặc oldfile-rescan), giữ entry mới nhất (theo `generated_at`). Đảm bảo `Phụ lục file`
+    đếm đúng N file thực, không 40 entry phù phiếm.
+    Cũng skip sidecar nội bộ `_vision_compare.json` (không phải giấy tờ KH).
+    """
     from .drive_helpers import get_or_create_folder, list_folder, download_file_text
     meta_id = get_or_create_folder(OCR_META_FOLDER, case_folder_id, drive_id=drive_id)
     files = list_folder(meta_id, drive_id=drive_id)
-    out: list[dict] = []
+    # P3.4 — gom theo content_hash; nếu trùng → giữ entry có generated_at mới nhất.
+    by_hash: dict = {}
+    no_hash: list = []
     for name, fid in files.items():
         if not name.lower().endswith(".json"):
+            continue
+        if name.startswith("_") or name.startswith("."):
+            # Sidecars nội bộ (_vision_compare.json, _processed.json…) — không phải giấy KH.
             continue
         try:
             d = json.loads(download_file_text(fid, drive_id=drive_id))
@@ -132,7 +143,7 @@ def build_dataset(case_folder_id: str, drive_id: str | None = None) -> list[dict
         if not isinstance(d, dict):
             continue
         gem = d.get("gemini") if isinstance(d.get("gemini"), dict) else {}
-        out.append({
+        entry = {
             "ten": d.get("new_name") or name[:-5],
             "loai": d.get("tag", ""),
             "folder": d.get("folder", ""),
@@ -144,7 +155,17 @@ def build_dataset(case_folder_id: str, drive_id: str | None = None) -> list[dict
             "needs_review": bool(d.get("needs_review")),
             "drive_link": d.get("drive_link", ""),
             "ngay_xu_ly": d.get("generated_at") or d.get("case_id", ""),
-        })
+            "content_hash": d.get("content_hash", ""),
+        }
+        h = entry["content_hash"]
+        if h:
+            prev = by_hash.get(h)
+            # Giữ entry mới nhất (ngay_xu_ly sort lexicographic vì format YYYY-mm-dd HH:MM:SS)
+            if prev is None or (entry["ngay_xu_ly"] or "") >= (prev["ngay_xu_ly"] or ""):
+                by_hash[h] = entry
+        else:
+            no_hash.append(entry)
+    out = list(by_hash.values()) + no_hash
     out.sort(key=lambda r: (r["loai"], r["ten"]))
     return out
 
@@ -698,17 +719,19 @@ def extract_profile_data(dataset: list[dict], applicant: str, today: str,
 # ===========================================================================
 def evaluate_profile_logic(profile, applicant: str, today: str, coverage: dict,
                            model: str | None = None, n_docs: int | None = None,
-                           dataset: list[dict] | None = None) -> dict:
+                           dataset: list[dict] | None = None,
+                           case_profile: dict | None = None) -> dict:
     """TẦNG 2: đọc hồ sơ đã chuẩn hoá (dict) — hoặc dataset thô (list, fallback) — + prompt thẩm định
     → báo cáo Markdown 4 phần. Trả {report_text, model_used, n_docs} hoặc {report_text:None, error}.
 
-    `dataset` (Phase 3 data-driven): dataset thô từ build_dataset() — cho phép rule_engine chạy
-    deterministic pre-check (vd thế chấp sổ đỏ, LLTP hết hạn) NGOÀI LLM rồi đưa kết quả vào prompt.
+    `dataset`: thô từ build_dataset() — cho rule_engine chạy deterministic per-doc.
+    `case_profile` (P3.3): cross-doc profile từ build_case_profile() — cho rule 2.4 + 5.3
+      (parent_dob_mismatch + children_missing_from_xnct).
     """
     model = model or CHECKLIST_MODEL
     if n_docs is None:
         n_docs = len(profile) if isinstance(profile, list) else len((profile or {}).get("documents") or [])
-    # Pre-check deterministic — chạy 11 rule có condition trong rules.yaml, đưa kết quả cho LLM tin tưởng.
+    # Pre-check deterministic — chạy mọi rule có condition trong rules.yaml.
     det_errors: list[dict] = []
     try:
         try:
@@ -717,12 +740,13 @@ def evaluate_profile_logic(profile, applicant: str, today: str, coverage: dict,
         except ImportError:
             from rule_loader import load_validations          # type: ignore  # noqa
             from rule_engine import detect_deterministic_errors  # type: ignore  # noqa
-        # Ưu tiên dataset thô (có du_lieu nguyên trạng); fallback dùng profile.documents
         eval_dataset = dataset if isinstance(dataset, list) else (
             profile if isinstance(profile, list) else (profile or {}).get("documents") or []
         )
-        if eval_dataset:
-            det_errors = detect_deterministic_errors(list(load_validations()), eval_dataset)
+        if eval_dataset or case_profile:
+            # P3.3 — pass case_profile để 2 rule mới (2.4, 5.3) trigger được.
+            det_errors = detect_deterministic_errors(list(load_validations()), eval_dataset or [],
+                                                     profile=case_profile)
             if det_errors:
                 print(f"evaluate_profile_logic: deterministic check phát hiện {len(det_errors)} lỗi "
                       f"({', '.join(e['code'] for e in det_errors)})", flush=True)
@@ -932,6 +956,144 @@ def build_dia_gioi(dataset: list, profile) -> dict | None:
 # ===========================================================================
 # Orchestrator (≈ process_lmia_dossier): dataset → tầng 1 → (địa giới) → tầng 2 → Google Doc
 # ===========================================================================
+# ===========================================================================
+# P3.2 — build_case_profile: aggregator cross-doc identities cho thẩm định + rule_engine
+# ===========================================================================
+def _name_norm(s: object) -> str:
+    """Normalize tên VN để so sánh: bỏ dấu, lowercase, trim, dồn space."""
+    if not isinstance(s, str) or not s:
+        return ""
+    try:
+        from .sop_naming import strip_diacritics
+    except ImportError:
+        from sop_naming import strip_diacritics  # type: ignore  # noqa
+    return re.sub(r"\s+", " ", strip_diacritics(s).lower().strip())
+
+
+def build_case_profile(dataset: list[dict]) -> dict:
+    """Aggregate identities chéo các giấy tờ trong case → 1 profile để inject vào LLM tầng 2
+    HOẶC rule_engine deterministic (xem P3.3 — parent_dob_mismatch, children_missing_from_xnct).
+
+    Trả:
+      {
+        "applicant": {"name", "dob_candidates":[(value, source)], "cccd": "", "evidence":[doc_names]},
+        "parents":   {"cha": {"name", "dob_candidates":[(value, source)]},
+                      "me":  {"name", "dob_candidates":[(value, source)]}},
+        "spouse":    {"name", "dob", "evidence":[]},
+        "children":  [{"name", "dob", "evidence":[]}],
+        "residence_members": [{"ho_ten","ngay_sinh","quan_he"}]   # từ XNCT
+      }
+    """
+    profile: dict = {
+        "applicant": {"name": "", "dob_candidates": [], "cccd": "", "evidence": []},
+        "parents":   {"cha": {"name": "", "dob_candidates": []},
+                      "me":  {"name": "", "dob_candidates": []}},
+        "spouse":    {"name": "", "dob": "", "evidence": []},
+        "children":  [],
+        "residence_members": [],
+    }
+    # Helper: gom dob candidate (deduped, giữ thứ tự).
+    def _add_dob(target: list, value: str, source: str):
+        if not value or not source:
+            return
+        for v, _ in target:
+            if v == value:
+                return
+        target.append((value, source))
+
+    children_by_norm: dict = {}   # name_norm → child dict
+
+    for d in dataset:
+        loai = d.get("loai", "")
+        du = d.get("du_lieu") if isinstance(d.get("du_lieu"), dict) else {}
+        doc_name = d.get("ten", "")
+        nguoi = d.get("nguoi", "")
+
+        # === Applicant identity (CCCD/Passport/LLTP của đương đơn — best heuristic: subject==applicant) ===
+        if loai in ("CCCD", "Passport", "LLTP") and nguoi:
+            if not profile["applicant"]["name"]:
+                profile["applicant"]["name"] = nguoi
+            profile["applicant"]["evidence"].append(doc_name)
+            if du.get("so_giay_to") and loai == "CCCD":
+                profile["applicant"]["cccd"] = profile["applicant"]["cccd"] or str(du.get("so_giay_to"))
+            if du.get("ngay_sinh"):
+                _add_dob(profile["applicant"]["dob_candidates"], str(du["ngay_sinh"]), doc_name)
+
+        # === Parents (cha/mẹ) — extracted từ MỌI loại giấy có ho_ten_cha/me ===
+        ho_cha = du.get("ho_ten_cha") or ""
+        ho_me = du.get("ho_ten_me") or ""
+        if ho_cha:
+            if not profile["parents"]["cha"]["name"]:
+                profile["parents"]["cha"]["name"] = ho_cha
+            # DOB candidates: ưu tiên ngay_sinh_cha (DD/MM/YYYY), fallback nam_sinh_cha (chỉ năm)
+            full_dob = du.get("ngay_sinh_cha")
+            year_only = du.get("nam_sinh_cha")
+            if full_dob:
+                _add_dob(profile["parents"]["cha"]["dob_candidates"], str(full_dob), doc_name)
+            elif year_only:
+                _add_dob(profile["parents"]["cha"]["dob_candidates"], str(year_only), doc_name)
+        if ho_me:
+            if not profile["parents"]["me"]["name"]:
+                profile["parents"]["me"]["name"] = ho_me
+            full_dob = du.get("ngay_sinh_me")
+            year_only = du.get("nam_sinh_me")
+            if full_dob:
+                _add_dob(profile["parents"]["me"]["dob_candidates"], str(full_dob), doc_name)
+            elif year_only:
+                _add_dob(profile["parents"]["me"]["dob_candidates"], str(year_only), doc_name)
+
+        # === Spouse — từ GKH (giấy kết hôn) ===
+        if loai == "GKH":
+            spouse_name = du.get("ho_ten_vo_chong") or ""
+            if spouse_name and not profile["spouse"]["name"]:
+                profile["spouse"]["name"] = spouse_name
+                profile["spouse"]["evidence"].append(doc_name)
+            # Đồng thời extracted có thể có ngay_sinh_vo_chong (nếu Gemini fill)
+            if du.get("ngay_sinh_vo_chong"):
+                profile["spouse"]["dob"] = profile["spouse"]["dob"] or str(du["ngay_sinh_vo_chong"])
+
+        # === Children — từ GKS con (subject ≠ applicant + có ho_ten_cha/me match applicant) + từ XN hoc ===
+        if loai == "GKS":
+            child_name = du.get("ho_ten") or nguoi
+            child_dob = du.get("ngay_sinh") or ""
+            cn = _name_norm(child_name)
+            if cn and cn not in children_by_norm:
+                # Loại trừ trường hợp GKS đương đơn (đã hint qua loai="GKS" cho applicant)
+                # bằng cách so applicant name (nếu đã set).
+                appl_norm = _name_norm(profile["applicant"]["name"])
+                if not appl_norm or cn != appl_norm:
+                    entry = {"name": child_name, "dob": child_dob, "evidence": [doc_name]}
+                    children_by_norm[cn] = entry
+                    profile["children"].append(entry)
+        elif loai == "XN hoc":
+            # XN hoc thường có subject là tên con, ngày sinh trong extracted
+            child_name = nguoi or du.get("ho_ten") or ""
+            child_dob = du.get("ngay_sinh") or ""
+            cn = _name_norm(child_name)
+            if cn and cn not in children_by_norm:
+                entry = {"name": child_name, "dob": child_dob, "evidence": [doc_name]}
+                children_by_norm[cn] = entry
+                profile["children"].append(entry)
+            elif cn:
+                # Đã có → gắn doc làm evidence
+                children_by_norm[cn]["evidence"].append(doc_name)
+                if not children_by_norm[cn].get("dob") and child_dob:
+                    children_by_norm[cn]["dob"] = child_dob
+
+        # === Residence members — từ XNCT extracted.thanh_vien_ho_khau ===
+        if loai == "XNCT":
+            members = du.get("thanh_vien_ho_khau")
+            if isinstance(members, list):
+                for mem in members:
+                    if isinstance(mem, dict) and mem.get("ho_ten"):
+                        profile["residence_members"].append({
+                            "ho_ten": mem.get("ho_ten") or "",
+                            "ngay_sinh": mem.get("ngay_sinh") or "",
+                            "quan_he": mem.get("quan_he_voi_chu_ho") or "",
+                        })
+    return profile
+
+
 def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
                   batch_items: list | None = None, today: str | None = None,
                   model: str | None = None,
@@ -1005,10 +1167,22 @@ def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
     except Exception as e:  # noqa: BLE001
         print(f"checklist: tra cứu địa giới (_dia_gioi) lỗi — bỏ qua: {type(e).__name__}: {e}", flush=True)
 
+    # --- P3.2: cross-doc profile (parent dob candidates, children, XNCT members) → ground truth ---
+    try:
+        _case_profile = build_case_profile(dataset)
+        if _case_profile:
+            if isinstance(eval_input, dict):
+                eval_input["_doi_chieu_cheo"] = _case_profile
+            else:
+                eval_input = list(eval_input) + [{"_doi_chieu_cheo": _case_profile}]
+    except Exception as e:  # noqa: BLE001
+        print(f"checklist: build_case_profile lỗi — bỏ qua: {type(e).__name__}: {e}", flush=True)
+        _case_profile = None
+
     # --- Tầng 2: đánh giá business-logic (model reasoning) → báo cáo Markdown -
-    # Truyền `dataset` thô để rule_engine chạy deterministic pre-check (thế chấp, hết hạn…).
+    # Truyền `dataset` thô (per-doc rule) + `case_profile` (cross-doc rule 2.4 + 5.3).
     res = evaluate_profile_logic(eval_input, applicant, today, coverage, model=model, n_docs=n_docs,
-                                 dataset=dataset)
+                                 dataset=dataset, case_profile=_case_profile)
     if not res.get("report_text"):
         return {"ran": False, "error": res.get("error") or "evaluate_profile_logic không trả về báo cáo",
                 "coverage": coverage, "model": res.get("model_used"), "extract_model": extract_model,
