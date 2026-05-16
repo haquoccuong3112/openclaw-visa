@@ -237,42 +237,84 @@ def docai_classify(pages_text: list[dict], filename: str,
     except Exception:  # noqa: BLE001
         _doc_catalog = ""
 
-    applicant_line = f'Đương đơn chính: "{applicant}"\n\n' if applicant else ""
+    applicant_line = f'Đương đơn chính (applicant): "{applicant}"\n\n' if applicant else ""
     prompt = f"""Đây là text OCR từ hồ sơ visa Canada. Phân tích và trả về JSON MỘT DÒNG, THUẦN (không markdown, không giải thích ngoài JSON).
 
-{applicant_line}# DANH MỤC LOẠI GIẤY TỜ BOT NHẬN DIỆN:
+{applicant_line}# DANH MỤC LOẠI GIẤY TỜ BOT NHẬN DIỆN (tham khảo — `doc_type` nên match TÊN tiếng Việt 1 trong các loại bên dưới):
 {_doc_catalog or "(catalog không load được)"}
 
 Các trường:
-- doc_type: loại giấy tờ tiếng Việt — PHÂN LOẠI THEO BẢN CHẤT GIẤY TỜ.
-  • "Căn cước công dân"/"Hộ chiếu"/"Sổ tiết kiệm"/… CHỈ khi đây ĐÚNG LÀ giấy tờ đó.
-  • "Ảnh thẻ": CHỈ khi file là 1 tấm ảnh chân dung chính thức kiểu dán hồ sơ (text OCR thường rỗng/rất ít).
-  • "Sao kê ngân hàng": CHỈ khi có danh sách giao dịch nhiều dòng + kỳ sao kê rõ ràng.
-  • Biểu mẫu khách tự khai → "Thông tin cá nhân (tự khai)".
+- doc_type: loại giấy tờ tiếng Việt — PHÂN LOẠI THEO BẢN CHẤT GIẤY TỜ, KHÔNG theo các trường/thông tin mà nó nhắc tới.
+  • "Căn cước công dân"/"Hộ chiếu"/"Sổ tiết kiệm"/"Lý lịch tư pháp"/"Sao kê ngân hàng"/… CHỈ khi file ĐÚNG LÀ giấy tờ đó
+    (vd: CCCD = tấm thẻ in 2 mặt có ảnh chân dung + chip/QR; hộ chiếu = cuốn hộ chiếu; sổ tiết kiệm = cuốn sổ ngân hàng).
+  • PHÂN BIỆT ẢNH (áp dụng khi text OCR rỗng hoặc rất ít — file là 1 tấm ảnh):
+    – text rỗng/tên file gợi ý ảnh chân dung 1 người, phông đơn sắc → doc_type = "Ảnh thẻ" VÀ extracted.la_anh_the = true;
+    – text/tên file gợi ý người làm nông / làm việc / vườn-ruộng-nhà kính → doc_type = "Ảnh làm nông";
+    – text/tên file gợi ý nhiều người / gia đình / tiệc / sự kiện → doc_type = "Ảnh gia đình".
+    ⚠️ Ảnh chân dung in TRÊN giấy tờ khác (thẻ CCCD, hộ chiếu, bằng cấp…) → phân loại theo giấy tờ đó, KHÔNG phải "Ảnh thẻ".
+  • Một tờ giấy / biểu mẫu do KHÁCH HÀNG TỰ KHAI / VIẾT TAY / TỰ ĐIỀN thông tin cá nhân (họ tên, ngày sinh, số CCCD,
+    địa chỉ, người thân…) → doc_type = "Thông tin cá nhân (tự khai)" (≈ sơ yếu lý lịch), KHÔNG phải "Căn cước công dân"
+    chỉ vì có ô "Số CCCD". Tương tự với các loại giấy khác — đừng vì file nhắc đến số/tên gì mà gán nhầm loại.
+  • "Sao kê ngân hàng": CHỈ áp dụng khi file có ĐÚNG cấu trúc sao kê tài khoản: SỐ TÀI KHOẢN + KỲ SAO KÊ
+    (từ ngày–đến ngày) + DANH SÁCH GIAO DỊCH nhiều dòng (cột nợ/có/số dư) + SỐ DƯ đầu/cuối kỳ. KHÔNG gắn
+    "Sao kê ngân hàng" cho: ảnh thẻ visa scan, biên lai đơn lẻ, thông báo SMS ngân hàng, hay bảng có vài hàng.
 - person: [{{"full_name":"...","date_of_birth":"...","relation":"..."}}]
-  • relation: "applicant"|"cha"|"me"|"vo"|"chong"|"con"|"anh_chi_em"|"khac"|""
-  • CHỈ ĐIỀN khi văn bản GHI RÕ quan hệ đó.
+  • relation: quan hệ của người đó với đương đơn chính. 1 trong:
+    "applicant" | "cha" | "me" | "vo" | "chong" | "con" | "anh_chi_em" | "khac" | "".
+  • CHỈ ĐIỀN khi văn bản GHI RÕ chữ "cha/bố/mẹ/vợ/chồng/con" kèm tên đó. KHÔNG SUY DIỄN.
+    "bs" = bản sao (viết tắt), KHÔNG phải họ tên người và KHÔNG phải "bố".
 - summary_vi: tóm tắt 1-2 câu
 - key_fields: {{"số giấy tờ":"...","ngày cấp":"...","nơi cấp":"..."}}
-- extracted: object trích thông tin; Các khoá:
+- extracted: object trích MỌI thông tin nhìn thấy phục vụ kiểm tra hồ sơ; trường nào không có để chuỗi rỗng "" hoặc mảng rỗng []. Chỉ điền cái nào áp dụng với loại giấy này. Các khoá có thể có:
   ho_ten, ngay_sinh, gioi_tinh, quoc_tich, noi_sinh, que_quan, noi_thuong_tru, noi_o_hien_tai,
-  so_giay_to, loai_so, ngay_cap, noi_cap, ngay_het_han, co_gia_tri_den,
-  ho_ten_cha, nam_sinh_cha, ngay_sinh_cha, ho_ten_me, nam_sinh_me, ngay_sinh_me,
+  so_giay_to, loai_so ("CMND 9 số"|"CCCD 12 số"|"hộ chiếu"|...), ngay_cap, noi_cap, ngay_het_han, co_gia_tri_den,
+  ho_ten_cha, nam_sinh_cha, ngay_sinh_cha (DD/MM/YYYY nếu thấy đầy đủ, nếu chỉ thấy năm thì để rỗng),
+  ho_ten_me, nam_sinh_me, ngay_sinh_me (DD/MM/YYYY tương tự),
   ho_ten_vo_chong, so_cmnd_cu_vo_chong, nguoi_di_khai_sinh,
-  thanh_vien_ho_khau, giay_co_gia_tri_den,
+  thanh_vien_ho_khau ([{{"ho_ten":"","ngay_sinh":"","so_dinh_danh":"","quan_he_voi_chu_ho":""}}]), giay_co_gia_tri_den,
   chu_tai_khoan, so_tai_khoan_hoac_so, so_tien, ky_han, ngay_dao_han, ngay_xac_nhan_so_du, so_du,
   ky_sao_ke_tu, ky_sao_ke_den, ten_cong_ty, ma_so_bhxh, giai_doan_dong_bhxh, ma_the_bhyt, bhyt_gia_tri_tu, bhyt_gia_tri_den,
-  tinh_trang_an_tich, la_to_khai, la_anh_the, co_dau_moc, co_chu_ky, visual_flags,
+  tinh_trang_an_tich,
+  la_to_khai (true nếu là tờ tự khai / biểu mẫu khách tự ghi; false nếu là giấy tờ chính thức do cơ quan cấp),
+  la_anh_the (true CHỈ khi cả file LÀ một tấm ảnh chân dung riêng lẻ kiểu ảnh dán hồ sơ — KHÔNG phải ảnh sinh hoạt / làm việc / làm nông / chụp nhóm, và KHÔNG phải ảnh chân dung in trên CCCD / hộ chiếu / bằng cấp),
+  co_dau_moc (true/false), co_chu_ky (true/false),
+  visual_flags (["ảnh mờ","nghi tẩy xóa","thiếu chữ ký","thiếu dấu mộc",...] — dấu hiệu bất thường đọc được từ text),
+
+  // Chỉ điền khi doc_type = "Ảnh thẻ":
   la_mat_moc, co_trang_suc, co_xam_lo, toc_toi_mau, phong_nen_trang,
-  co_2_o_van_tay, bang_cap_level, gplx_hang, cccd_mat, co_dau_xa_phuong,
-  mrz
+
+  // Chỉ điền khi doc_type = "Căn cước công dân" và là mặt sau:
+  co_2_o_van_tay (true nếu text OCR hoặc tên file chỉ ra MẶT SAU có đủ 2 ô vân tay),
+
+  // Sub-typing — chỉ điền khi loại tương ứng:
+  bang_cap_level ("cap_2"|"cap_3"|"trung_cap"|"cao_dang"|"dai_hoc"|"thac_si"|"tien_si"|"khac"),
+  gplx_hang ("A1"|"A2"|"B"|"B2"|"C"|"D"|"E"|"FC"),
+  cccd_mat ("truoc"|"sau"|"2-mat" — file có cả 2 mặt thì "2-mat"),
+  co_dau_xa_phuong (true CHỈ khi đây là Sơ yếu lý lịch / đơn / xác nhận CÓ con dấu mộc tròn của UBND xã/phường),
+
+  // MRZ — chỉ điền khi doc_type là CCCD hoặc Hộ chiếu VÀ text OCR có vùng MRZ (dòng chứa "<<"):
+  mrz: {{"raw":"<2-3 dòng MRZ nguyên văn>", "name":"<tên parse từ MRZ>", "dob":"<DD/MM/YYYY>", "doc_no":"<số giấy tờ>"}}
+  ⚠️ MRZ name LÀ GROUND-TRUTH chủ giấy tờ — KHÔNG được dùng tên ngoài MRZ nếu MRZ rõ ràng đọc được.
+
+QUY TẮC CHỐNG SUY DIỄN (BẮT BUỘC):
+- "bs" = "bản sao" (viết tắt thường dùng trên giấy khai sinh bản sao). KHÔNG được dịch thành "ba" / "bố" / coi là họ tên người.
+- KHÔNG được tự chèn "vợ" / "chồng" / "con" / "bố" / "mẹ" vào tên người hoặc relation nếu văn bản KHÔNG ghi rõ chữ đó kèm tên cụ thể.
+- Một CCCD/giấy tờ thuộc về MỘT chủ thể duy nhất — nếu MRZ đọc được, chủ thể = MRZ name; nếu không, chủ thể = họ tên ngay dưới dòng "Họ tên" / "Full name", KHÔNG phải tên người được nhắc tới trong các trường phụ.
+
+VÍ DỤ output (3 case tham khảo):
+
+VD1 (CCCD): {{"doc_type":"Căn cước công dân","person":[{{"full_name":"Nguyễn Văn A","date_of_birth":"01/01/1990","relation":"applicant"}}],"summary_vi":"Thẻ CCCD của Nguyễn Văn A, số 0123...","key_fields":{{"số CCCD":"0123...","ngày cấp":"15/03/2021"}},"extracted":{{"ho_ten":"Nguyễn Văn A","ngay_sinh":"01/01/1990","so_giay_to":"0123456789","loai_so":"CCCD 12 số","ngay_cap":"15/03/2021","la_to_khai":false,"la_anh_the":false}}}}
+
+VD2 (Sổ đất): {{"doc_type":"Giấy chứng nhận quyền sử dụng đất","person":[],"summary_vi":"Sổ đất của Trần Văn B + vợ, thửa 123 tại huyện X","key_fields":{{"số GCN":"AB-12345"}},"extracted":{{"chu_su_dung":"Trần Văn B và Nguyễn Thị C","dia_chi_thua":"thửa 123 tờ bản đồ 4, xã Y, huyện X","dien_tich":"180 m2"}}}}
+
+VD3 (Khai sinh con): {{"doc_type":"Trích lục khai sinh","person":[{{"full_name":"Trần Văn D","date_of_birth":"05/05/2015","relation":"con"}}],"summary_vi":"Khai sinh của Trần Văn D (con), bố Trần Văn B, mẹ Nguyễn Thị C","key_fields":{{"số khai sinh":"123/2015"}},"extracted":{{"ho_ten":"Trần Văn D","ngay_sinh":"05/05/2015","ho_ten_cha":"Trần Văn B","ho_ten_me":"Nguyễn Thị C","la_to_khai":false}}}}
 
 Tên file: {filename}
 
 TEXT OCR:
 {text_content[:10000]}
 
-Nếu không đọc được nội dung, trả JSON với doc_type="Khac" và summary_vi mô tả và "extracted": {{}}."""
+Nếu không đọc được nội dung, trả JSON với doc_type="Khac", summary_vi mô tả lý do, và "extracted": {{}}."""
 
     payload = {
         "model": model or OCR_CLASSIFY_MODEL,
