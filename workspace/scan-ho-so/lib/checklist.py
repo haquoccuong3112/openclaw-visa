@@ -34,10 +34,10 @@ _HERE = Path(__file__).resolve().parent
 SCAN_HO_SO_DIR = Path(os.environ.get("SCAN_HO_SO_DIR", str(_HERE.parent)))
 
 # Tầng 2 — model reasoning (đánh giá business-logic, sinh báo cáo 4 phần)
-CHECKLIST_MODEL = os.environ.get("CHECKLIST_MODEL", "google/gemini-2.5-pro")
-CHECKLIST_FALLBACK_MODEL = os.environ.get("CHECKLIST_FALLBACK_MODEL", "google/gemini-2.5-flash")
+CHECKLIST_MODEL = os.environ.get("CHECKLIST_MODEL", "gpt-5-mini")
+CHECKLIST_FALLBACK_MODEL = os.environ.get("CHECKLIST_FALLBACK_MODEL", "gpt-5-mini")
 # Tầng 1 — model rẻ để gộp/chuẩn hoá summary+extracted của các file thành 1 JSON hồ sơ cô đọng
-CHECKLIST_EXTRACT_MODEL = os.environ.get("CHECKLIST_EXTRACT_MODEL", "google/gemini-2.5-flash")
+CHECKLIST_EXTRACT_MODEL = os.environ.get("CHECKLIST_EXTRACT_MODEL", "gpt-5-mini")
 OCR_META_FOLDER = "_Bot OCR & Metadata"
 MERGE_CUTOFF = date(2025, 6, 12)
 
@@ -686,8 +686,12 @@ def _trim_dataset_for_llm(dataset: list[dict]) -> list[dict]:
 
 async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
                                    timeout: int = 300, temperature: float = 0.1) -> str:
-    """Gọi OpenRouter với stream=True. Yield từng delta qua callback `on_chunk(text_delta)`
-    (async function). Trả về full text cuối cùng. Caller dùng on_chunk để edit Telegram tin.
+    """Gọi LLM streaming qua OpenAI, DeepSeek, hoặc OpenRouter.
+    - model bắt đầu bằng "gpt-" hoặc "openai/" + OPENAI_API_KEY → api.openai.com
+    - model bắt đầu bằng "deepseek/" + DEEPSEEK_API_KEY → api.deepseek.com
+    - Còn lại → openrouter.ai
+    Yield từng delta qua callback `on_chunk(text_delta)` (async function).
+    Trả về full text cuối cùng. Caller dùng on_chunk để edit Telegram tin.
 
     SSE format (OpenAI-compatible):
         data: {"choices":[{"delta":{"content":"..."}}]}
@@ -696,11 +700,26 @@ async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
     Lỗi → raise. Caller có thể fallback _call_openrouter (non-stream)."""
     import httpx
     import json as _json
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY chưa được cấu hình")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    is_openai_model = model.startswith("gpt-") or model.startswith("openai/")
+    is_deepseek_model = model.startswith("deepseek/")
+    if is_openai_model and openai_key:
+        api_endpoint = "https://api.openai.com/v1/chat/completions"
+        api_key = openai_key
+        direct_model = model.removeprefix("openai/")
+    elif is_deepseek_model and deepseek_key:
+        api_endpoint = "https://api.deepseek.com/v1/chat/completions"
+        api_key = deepseek_key
+        direct_model = model.split("/", 1)[1]
+    else:
+        api_endpoint = "https://openrouter.ai/api/v1/chat/completions"
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        direct_model = model
+        if not api_key:
+            raise RuntimeError("Thiếu OPENAI_API_KEY, DEEPSEEK_API_KEY, và OPENROUTER_API_KEY")
     payload = {
-        "model": model,
+        "model": direct_model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -711,7 +730,7 @@ async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
     buf: list[str] = []
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream(
-            "POST", "https://openrouter.ai/api/v1/chat/completions",
+            "POST", api_endpoint,
             headers={"Authorization": f"Bearer {api_key}"}, json=payload,
         ) as resp:
             if resp.status_code >= 400:
@@ -754,22 +773,30 @@ async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
 
 def _call_openrouter(model: str, system: str, user: str, timeout: int = 300,
                      json_mode: bool = False, temperature: float = 0.1) -> str:
-    """Gọi LLM qua OpenRouter hoặc DeepSeek direct API.
-    Nếu model là "deepseek/*" và DEEPSEEK_API_KEY có → dùng api.deepseek.com (tránh OpenRouter queue).
+    """Gọi LLM qua OpenAI, DeepSeek, hoặc OpenRouter.
+    - model bắt đầu bằng "gpt-" hoặc "openai/" + OPENAI_API_KEY → api.openai.com
+    - model bắt đầu bằng "deepseek/" + DEEPSEEK_API_KEY → api.deepseek.com
+    - Còn lại → openrouter.ai
     json_mode=True → thêm response_format json_object; retry không kèm nếu HTTP ≥400."""
     import httpx
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    use_direct = deepseek_key and model.startswith("deepseek/")
-    if use_direct:
+    is_openai_model = model.startswith("gpt-") or model.startswith("openai/")
+    is_deepseek_model = model.startswith("deepseek/")
+    if is_openai_model and openai_key:
+        api_endpoint = "https://api.openai.com/v1/chat/completions"
+        api_key = openai_key
+        direct_model = model.removeprefix("openai/")
+    elif is_deepseek_model and deepseek_key:
         api_endpoint = "https://api.deepseek.com/v1/chat/completions"
         api_key = deepseek_key
-        direct_model = model.split("/", 1)[1]  # "deepseek/deepseek-v4-pro" → "deepseek-v4-pro"
+        direct_model = model.split("/", 1)[1]
     else:
         api_endpoint = "https://openrouter.ai/api/v1/chat/completions"
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         direct_model = model
         if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY chưa được cấu hình")
+            raise RuntimeError("Thiếu OPENAI_API_KEY, DEEPSEEK_API_KEY, và OPENROUTER_API_KEY")
     payload = {
         "model": direct_model,
         "messages": [

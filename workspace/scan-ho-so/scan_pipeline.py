@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+import functools
 import hashlib
 import json
 import os
@@ -52,12 +53,6 @@ import time
 import traceback
 import zipfile
 from pathlib import Path
-
-try:
-    import PIL.Image  # noqa: F401 — kéo lên top-level để fail-fast khi thiếu Pillow.
-    _HAS_PIL = True
-except ImportError:
-    _HAS_PIL = False
 
 # --- this file lives in the scan-ho-so app dir; lib/ and data/ are right here ---
 # (SCAN_HO_SO_DIR env var can override, e.g. if you run a copy from elsewhere).
@@ -80,23 +75,15 @@ for env_path in (
         break
 
 SHARED_DRIVE_ID = os.environ.get("SHARED_DRIVE_ID", "0AIYOQpLqtMPvUk9PVA")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "google/gemini-2.5-flash")
-# Model text-only (vd deepseek/deepseek-v4-flash) để re-classify sau Gemini OCR.
-# Rỗng = tắt bước này (fallback classify_doc_type() regex như cũ).
-CLASSIFY_MODEL = os.environ.get("CLASSIFY_MODEL", "")
-# Document AI processor id (từ GOOGLE_DOCUMENTAI_PROCESSOR_ID trong scan-ocr.env).
-# Khi có → PDF đi qua flow mới: DocAI OCR toàn bộ → DeepSeek plan → split/upload.
-# Rỗng → giữ flow cũ (Gemini page-classify) làm fallback.
+# Model for post-DocAI structure extraction.
+OCR_CLASSIFY_MODEL = os.environ.get("OCR_CLASSIFY_MODEL", "gpt-5-mini")
+# Document AI processor id — REQUIRED.
 DOCAI_PROCESSOR_ID = os.environ.get("GOOGLE_DOCUMENTAI_PROCESSOR_ID", "")
-# Model DeepSeek cho planning call (DocAI flow). Mặc định dùng pro (cần reason tốt hơn flash).
-DOCAI_PLAN_MODEL = os.environ.get("DOCAI_PLAN_MODEL", "deepseek/deepseek-v4-pro")
-# Batch-plan nhiều PDF sau khi DocAI OCR xong để tránh 1 DeepSeek call / PDF nhỏ.
-DOCAI_BATCH_PLAN = os.environ.get("DOCAI_BATCH_PLAN", "1").lower() not in {"0", "false", "no"}
+# Batch-plan nhiều PDF để tránh 1 LLM call / PDF nhỏ.
 DOCAI_BATCH_PLAN_MAX_FILES = int(os.environ.get("DOCAI_BATCH_PLAN_MAX_FILES", "12"))
 DOCAI_BATCH_PLAN_MAX_CHARS = int(os.environ.get("DOCAI_BATCH_PLAN_MAX_CHARS", "24000"))
-# Schema strict cho response_format khi gọi Gemini OCR (OpenRouter json_schema). Khi model
-# không nhận → fallback json_object → fallback off (xem gemini_classify_file).
-GEMINI_RESPONSE_SCHEMA = {
+# Response schema for structure extraction (gpt-5-mini with json_schema).
+OCR_RESPONSE_SCHEMA = {
     "name": "ocr_result",
     "strict": True,
     "schema": {
@@ -107,8 +94,7 @@ GEMINI_RESPONSE_SCHEMA = {
                 "properties": {
                     "full_name": {"type": "string"},
                     "date_of_birth": {"type": "string"},
-                    # P3.1: relation của person này với đương đơn (chỉ điền khi văn bản ghi RÕ).
-                    "relation": {"type": "string"},  # one of: applicant, cha, me, vo, chong, con, anh_chi_em, khac, ""
+                    "relation": {"type": "string"},
                 },
                 "additionalProperties": True}},
             "summary_vi": {"type": "string"},
@@ -119,20 +105,18 @@ GEMINI_RESPONSE_SCHEMA = {
         "additionalProperties": True,
     },
 }
+# Extensions DocAI can OCR (images + PDF; .doc/.docx converted via LibreOffice → PDF first).
+DOCAI_OCR_EXTS = {
+    ".pdf", ".jpg", ".jpeg", ".png",
+    ".tiff", ".tif", ".bmp", ".webp", ".gif",
+    ".doc", ".docx",
+}
 TOP_FOLDERS = ["Personal Docs", "Education", "Asset", "Employment"]
 OCR_META_FOLDER = "_Bot OCR & Metadata"
 DA_DUYET_FOLDER = "Đã duyệt"   # staff review folder — bot reads, never writes files here
-# Số file được Gemini OCR ĐỒNG THỜI (mỗi file 1 HTTP call độc lập). Phân loại + upload Drive + thẩm định vẫn tuần tự.
+# Số file được DocAI OCR ĐỒNG THỜI. Phân loại + upload Drive + thẩm định vẫn tuần tự.
 OCR_WORKERS = max(1, int(os.environ.get("SCAN_OCR_WORKERS", "5")))
 
-# Extensions Gemini can read (OCR/understanding). Everything else is still
-# uploaded — just classified from the filename and flagged needs_review.
-OCR_EXT_MIME = {
-    ".pdf": "application/pdf",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-}
 OTHER_EXT_MIME = {
     ".heic": "image/heic",
     ".heif": "image/heif",
@@ -155,11 +139,6 @@ OTHER_EXT_MIME = {
 # ============================================================================
 def log(msg: str) -> None:
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
-
-
-if not _HAS_PIL:
-    log("⚠️ Pillow chưa cài → multi-page PDF split sẽ bị disable. "
-        "Fix: pip3 install --user --break-system-packages Pillow")
 
 
 # ============================================================================
@@ -200,321 +179,168 @@ def collect_from_zip(zip_path: Path, workdir: Path) -> list[tuple[Path, str]]:
 
 
 # ============================================================================
-# Gemini OCR / document understanding  (sync; one call per file)
+# DocAI OCR → gpt-5-mini structure extraction
 # ============================================================================
-def gemini_classify_file(path: Path, filename: str, model: str | None = None) -> dict:
-    import httpx  # local import so --self-test works without it installed
+def _call_classify_api(payload: dict, timeout: int = 120) -> str:
+    """Call gpt-5-mini (OpenAI) → fallback OpenRouter. Returns raw response text."""
+    import httpx
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        return {"doc_type": "", "person": [], "summary_vi": "(no OPENROUTER_API_KEY)", "key_fields": {}, "extracted": {}}
-    mime = OCR_EXT_MIME.get(path.suffix.lower(), "application/pdf")
-    content_b64 = base64.b64encode(path.read_bytes()).decode()
-    # Inject doc type catalog từ data/doc_types.yaml (Phase 5 data-driven).
-    # Helps LLM thấy description đầy đủ của mỗi loại, không chỉ tag name hardcoded.
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+    model = payload.get("model", OCR_CLASSIFY_MODEL)
+
+    if openai_key:
+        endpoint = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {openai_key}"}
+    elif openrouter_key:
+        endpoint = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {openrouter_key}"}
+    else:
+        raise RuntimeError("Thiếu OPENAI_API_KEY và OPENROUTER_API_KEY")
+
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(endpoint, headers=headers, json=payload)
+        if resp.status_code >= 400:
+            payload2 = {**payload, "response_format": {"type": "json_object"}}
+            payload2.pop("response_format", None) if "json_schema" not in str(payload.get("response_format", {})) else None
+            payload2["response_format"] = {"type": "json_object"}
+            resp = client.post(endpoint, headers=headers, json=payload2)
+        if resp.status_code >= 400:
+            payload3 = {k: v for k, v in payload.items() if k != "response_format"}
+            resp = client.post(endpoint, headers=headers, json=payload3)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def docai_classify(pages_text: list[dict], filename: str,
+                   applicant: str = "", model: str | None = None) -> dict:
+    """DocAI pages text → gpt-5-mini structure extraction.
+
+    Takes [{page: N, text: str}] from DocAI → returns gem dict:
+    {doc_type, person[], summary_vi, key_fields, extracted}
+    """
+    if not pages_text:
+        return {"doc_type": "Khac", "person": [], "summary_vi": "(no text)", "key_fields": {}, "extracted": {}}
+
+    if len(pages_text) == 1:
+        text_content = pages_text[0].get("text", "")
+    else:
+        parts = [f"[Trang {p['page']}]\n{p.get('text', '')}" for p in pages_text]
+        text_content = "\n\n".join(parts)
+
+    if not text_content.strip():
+        return {"doc_type": "Khac", "person": [], "summary_vi": "(không đọc được text)", "key_fields": {}, "extracted": {}}
+
     try:
         from lib.rule_loader import generate_doc_type_catalog
         _doc_catalog = generate_doc_type_catalog()
-    except Exception:  # noqa: BLE001 — graceful: nếu YAML lỗi thì dùng prompt cũ không catalog
+    except Exception:  # noqa: BLE001
         _doc_catalog = ""
-    prompt = f"""Đọc trực tiếp file hồ sơ visa Canada đính kèm và trả về JSON MỘT DÒNG, THUẦN (không markdown, không giải thích ngoài JSON).
 
-# DANH MỤC LOẠI GIẤY TỜ BOT NHẬN DIỆN (tham khảo — `doc_type` nên match TÊN tiếng Việt 1 trong các loại bên dưới):
+    applicant_line = f'Đương đơn chính: "{applicant}"\n\n' if applicant else ""
+    prompt = f"""Đây là text OCR từ hồ sơ visa Canada. Phân tích và trả về JSON MỘT DÒNG, THUẦN (không markdown, không giải thích ngoài JSON).
+
+{applicant_line}# DANH MỤC LOẠI GIẤY TỜ BOT NHẬN DIỆN:
 {_doc_catalog or "(catalog không load được)"}
 
 Các trường:
-- doc_type: loại giấy tờ tiếng Việt — PHÂN LOẠI THEO BẢN CHẤT GIẤY TỜ, KHÔNG theo các trường/thông tin mà nó nhắc tới.
-  • "Căn cước công dân"/"Hộ chiếu"/"Sổ tiết kiệm"/"Lý lịch tư pháp"/"Sao kê ngân hàng"/… CHỈ khi file ĐÚNG LÀ giấy tờ đó
-    (vd: CCCD = tấm thẻ in 2 mặt có ảnh chân dung + chip/QR; hộ chiếu = cuốn hộ chiếu; sổ tiết kiệm = cuốn sổ ngân hàng).
-  • PHÂN BIỆT ẢNH (chỉ áp dụng khi CẢ FILE LÀ một tấm ảnh — không áp dụng cho ảnh chân dung in TRÊN giấy tờ khác):
-    – cả file LÀ một tấm ảnh chân dung CHÍNH THỨC kiểu ảnh dán hồ sơ / hộ chiếu: 1 người, chỉ đầu + vai, phông nền
-      ĐƠN SẮC (trắng/xanh), nhìn thẳng, KHÔNG có cảnh vật / hoạt động → doc_type = "Ảnh thẻ" VÀ "extracted.la_anh_the" = true;
-    – 1 người đang LÀM VIỆC / làm nông / ở vườn-ruộng-nhà kính / chăm cây-trồng hoa (dù thấy rõ mặt) → doc_type = "Ảnh làm nông" (KHÔNG phải "Ảnh thẻ");
-    – ảnh chụp NHIỀU người / gia đình / tiệc / sự kiện → doc_type = "Ảnh gia đình".
-    ⚠️ Một tấm ảnh chân dung in TRÊN một giấy tờ khác (thẻ CCCD, cuốn hộ chiếu, bằng cấp, sơ yếu lý lịch…) thì phân
-    loại theo giấy tờ đó ("Căn cước công dân" / "Hộ chiếu" / …) — KHÔNG phải "Ảnh thẻ", và la_anh_the = false.
-  • Một tờ giấy / biểu mẫu do KHÁCH HÀNG TỰ KHAI / VIẾT TAY / TỰ ĐIỀN thông tin cá nhân (họ tên, ngày sinh, số CCCD,
-    địa chỉ, người thân…) → doc_type = "Thông tin cá nhân (tự khai)" (≈ sơ yếu lý lịch), KHÔNG phải "Căn cước công dân"
-    chỉ vì có ô "Số CCCD". Tương tự với các loại giấy khác — đừng vì file nhắc đến số/tên gì mà gán nhầm loại.
-  • "Sao kê ngân hàng": CHỈ áp dụng khi file có ĐÚNG cấu trúc sao kê tài khoản: SỐ TÀI KHOẢN + KỲ SAO KÊ
-    (từ ngày–đến ngày) + DANH SÁCH GIAO DỊCH nhiều dòng (cột nợ/có/số dư) + SỐ DƯ đầu/cuối kỳ. KHÔNG gắn
-    "Sao kê ngân hàng" cho: ảnh thẻ visa scan, ảnh trang passport (page có thông tin cá nhân), biên lai đơn
-    lẻ, thông báo SMS ngân hàng, hay bảng thông tin có vài hàng. Nếu file là 1 TẤM THẺ (visa card / passport /
-    CCCD scan) hay 1 trang giấy thông tin → phân theo loại giấy đó (Hộ chiếu / Căn cước / Thẻ tín dụng / …),
-    KHÔNG phải "Sao kê ngân hàng".
+- doc_type: loại giấy tờ tiếng Việt — PHÂN LOẠI THEO BẢN CHẤT GIẤY TỜ.
+  • "Căn cước công dân"/"Hộ chiếu"/"Sổ tiết kiệm"/… CHỈ khi đây ĐÚNG LÀ giấy tờ đó.
+  • "Ảnh thẻ": CHỈ khi file là 1 tấm ảnh chân dung chính thức kiểu dán hồ sơ (text OCR thường rỗng/rất ít).
+  • "Sao kê ngân hàng": CHỈ khi có danh sách giao dịch nhiều dòng + kỳ sao kê rõ ràng.
+  • Biểu mẫu khách tự khai → "Thông tin cá nhân (tự khai)".
 - person: [{{"full_name":"...","date_of_birth":"...","relation":"..."}}]
-  • relation: quan hệ của người đó với "đương đơn chính" (chủ hồ sơ). 1 trong:
-    "applicant" | "cha" | "me" | "vo" | "chong" | "con" | "anh_chi_em" | "khac" | "".
-  • CHỈ ĐIỀN khi văn bản GHI RÕ chữ "cha/bố/mẹ/vợ/chồng/con" kèm tên đó. KHÔNG SUY DIỄN.
-    "bs" = bản sao (viết tắt), KHÔNG phải họ tên người và KHÔNG phải "bố".
+  • relation: "applicant"|"cha"|"me"|"vo"|"chong"|"con"|"anh_chi_em"|"khac"|""
+  • CHỈ ĐIỀN khi văn bản GHI RÕ quan hệ đó.
 - summary_vi: tóm tắt 1-2 câu
 - key_fields: {{"số giấy tờ":"...","ngày cấp":"...","nơi cấp":"..."}}
-- extracted: object trích MỌI thông tin nhìn thấy phục vụ kiểm tra hồ sơ; trường nào không có để chuỗi rỗng "" hoặc mảng rỗng []. Chỉ điền cái nào áp dụng với loại giấy này. Các khoá có thể có:
+- extracted: object trích thông tin; Các khoá:
   ho_ten, ngay_sinh, gioi_tinh, quoc_tich, noi_sinh, que_quan, noi_thuong_tru, noi_o_hien_tai,
-  so_giay_to, loai_so ("CMND 9 số"|"CCCD 12 số"|"hộ chiếu"|...), ngay_cap, noi_cap, ngay_het_han, co_gia_tri_den,
-  ho_ten_cha, nam_sinh_cha, ngay_sinh_cha (DD/MM/YYYY nếu thấy đầy đủ, nếu chỉ thấy năm thì để rỗng),
-  ho_ten_me, nam_sinh_me, ngay_sinh_me (DD/MM/YYYY tương tự),
+  so_giay_to, loai_so, ngay_cap, noi_cap, ngay_het_han, co_gia_tri_den,
+  ho_ten_cha, nam_sinh_cha, ngay_sinh_cha, ho_ten_me, nam_sinh_me, ngay_sinh_me,
   ho_ten_vo_chong, so_cmnd_cu_vo_chong, nguoi_di_khai_sinh,
-  thanh_vien_ho_khau ([{{"ho_ten":"","ngay_sinh":"","so_dinh_danh":"","quan_he_voi_chu_ho":""}}]), giay_co_gia_tri_den,
+  thanh_vien_ho_khau, giay_co_gia_tri_den,
   chu_tai_khoan, so_tai_khoan_hoac_so, so_tien, ky_han, ngay_dao_han, ngay_xac_nhan_so_du, so_du,
   ky_sao_ke_tu, ky_sao_ke_den, ten_cong_ty, ma_so_bhxh, giai_doan_dong_bhxh, ma_the_bhyt, bhyt_gia_tri_tu, bhyt_gia_tri_den,
-  tinh_trang_an_tich, la_to_khai (true nếu là tờ tự khai / biểu mẫu khách tự ghi; false nếu là giấy tờ chính thức do cơ quan cấp),
-  la_anh_the (true CHỈ khi cả file LÀ một tấm ảnh chân dung riêng lẻ kiểu ảnh dán hồ sơ — KHÔNG phải ảnh sinh hoạt / làm việc / làm nông / chụp nhóm, và KHÔNG phải ảnh chân dung in trên CCCD / hộ chiếu / bằng cấp),
-  co_dau_moc (true/false), co_chu_ky (true/false), visual_flags (["ảnh mờ","nghi tẩy xóa ...","thiếu chữ ký","thiếu dấu mộc",...]),
-
-  // Chỉ điền khi doc_type = "Ảnh thẻ" (file CẢ là 1 tấm ảnh chân dung độc lập):
-  la_mat_moc (true nếu mặt mộc — không son phấn, không kẻ mắt đậm; false nếu có trang điểm rõ),
-  co_trang_suc (true nếu có trang sức như bông tai, dây chuyền, vòng tay, kính thời trang; false nếu không),
-  co_xam_lo (true nếu thấy hình xăm lộ ra trong khung ảnh — cổ, vai, ngực, tay nếu thấy),
-  toc_toi_mau (true nếu tóc màu tối tự nhiên: đen/nâu sậm; false nếu nhuộm sáng/highlight/màu lạ),
-  phong_nen_trang (true nếu phông nền trắng/xanh đơn sắc, đủ sáng; false nếu phông phức tạp/lộn xộn/tối),
-
-  // Chỉ điền khi doc_type = "Căn cước công dân" và FILE LÀ MẶT SAU CCCD:
-  co_2_o_van_tay (true nếu mặt sau có ĐỦ 2 ô dấu vân tay rõ — ngón trỏ trái + ngón trỏ phải; false nếu thiếu 1/2 ô, mờ, hoặc trống),
-
-  // Sub-typing — chỉ điền khi loại tương ứng:
-  bang_cap_level (chỉ khi doc_type là bằng cấp; 1 trong: "cap_2"|"cap_3"|"trung_cap"|"cao_dang"|"dai_hoc"|"thac_si"|"tien_si"|"khac"),
-  gplx_hang (chỉ khi GPLX; vd "A1"|"A2"|"B"|"B2"|"C"|"D"|"E"|"FC"),
-  cccd_mat (chỉ khi doc_type là CCCD/CMND; 1 trong "truoc"|"sau"|"2-mat" — file có cả 2 mặt thì "2-mat"),
-  co_dau_xa_phuong (true CHỈ khi đây là Sơ yếu lý lịch / đơn / xác nhận CÓ con dấu mộc tròn của UBND xã/phường — phân biệt với CV viết tay không dấu),
-
-  // MRZ — chỉ điền khi doc_type là CCCD hoặc Hộ chiếu VÀ file có vùng MRZ (3 dòng `<<` dưới đáy CCCD hoặc 2 dòng ở trang dữ liệu hộ chiếu):
-  mrz: {{ "raw":"<2-3 dòng MRZ nguyên văn, mỗi dòng 1 chuỗi>", "name":"<tên parse từ MRZ>", "dob":"<DD/MM/YYYY parse từ MRZ>", "doc_no":"<số giấy tờ parse từ MRZ>" }}
-  ⚠️ MRZ name LÀ GROUND-TRUTH chủ giấy tờ — KHÔNG được dùng tên ngoài MRZ nếu MRZ rõ ràng đọc được.
-
-QUY TẮC CHỐNG SUY DIỄN (BẮT BUỘC):
-- "bs" = "bản sao" (viết tắt thường dùng trên giấy khai sinh bản sao). KHÔNG được dịch thành "ba" / "bố" / coi là họ tên người.
-- KHÔNG được tự chèn "vợ" / "chồng" / "con" / "bố" / "mẹ" vào tên người hoặc relation nếu văn bản KHÔNG ghi rõ chữ đó kèm tên cụ thể.
-- Một CCCD/giấy tờ thuộc về MỘT chủ thể duy nhất — nếu MRZ đọc được, chủ thể = MRZ name; nếu không, chủ thể = họ tên ngay dưới dòng "Họ tên" / "Full name", KHÔNG phải tên người được nhắc tới trong các trường phụ.
-
-VÍ DỤ output (3 case tham khảo — JSON output thực tế phải khớp file thực):
-
-VD1 (CCCD scan): {{"doc_type":"Căn cước công dân","person":[{{"full_name":"Nguyễn Văn A","date_of_birth":"01/01/1990"}}],"summary_vi":"Thẻ CCCD của Nguyễn Văn A, số 0123...","key_fields":{{"số CCCD":"0123...","ngày cấp":"15/03/2021"}},"extracted":{{"ho_ten":"Nguyễn Văn A","ngay_sinh":"01/01/1990","so_giay_to":"0123456789","loai_so":"CCCD 12 số","ngay_cap":"15/03/2021","la_to_khai":false,"la_anh_the":false}}}}
-
-VD2 (Sổ đất / GCNQSDĐ): {{"doc_type":"Giấy chứng nhận quyền sử dụng đất","person":[],"summary_vi":"Sổ đất của Trần Văn B + vợ, thửa 123 tại huyện X","key_fields":{{"số GCN":"AB-12345"}},"extracted":{{"chu_su_dung":"Trần Văn B và Nguyễn Thị C","dia_chi_thua":"thửa 123 tờ bản đồ 4, xã Y, huyện X","dien_tich":"180 m2"}}}}
-
-VD3 (Khai sinh con — relation): {{"doc_type":"Trích lục khai sinh","person":[{{"full_name":"Trần Văn D","date_of_birth":"05/05/2015"}}],"summary_vi":"Khai sinh của Trần Văn D (con), bố Trần Văn B, mẹ Nguyễn Thị C","key_fields":{{"số khai sinh":"123/2015"}},"extracted":{{"ho_ten":"Trần Văn D","ngay_sinh":"05/05/2015","ho_ten_cha":"Trần Văn B","ho_ten_me":"Nguyễn Thị C","la_to_khai":false}}}}
+  tinh_trang_an_tich, la_to_khai, la_anh_the, co_dau_moc, co_chu_ky, visual_flags,
+  la_mat_moc, co_trang_suc, co_xam_lo, toc_toi_mau, phong_nen_trang,
+  co_2_o_van_tay, bang_cap_level, gplx_hang, cccd_mat, co_dau_xa_phuong,
+  mrz
 
 Tên file: {filename}
 
-Nếu không đọc được file, vẫn trả JSON với summary_vi mô tả lý do và "extracted": {{}}."""
+TEXT OCR:
+{text_content[:10000]}
+
+Nếu không đọc được nội dung, trả JSON với doc_type="Khac" và summary_vi mô tả và "extracted": {{}}."""
+
     payload = {
-        "model": model or GEMINI_MODEL,
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "file", "file": {"filename": filename, "file_data": f"data:{mime};base64,{content_b64}"}},
-        ]}],
+        "model": model or OCR_CLASSIFY_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
-        "response_format": {"type": "json_schema", "json_schema": GEMINI_RESPONSE_SCHEMA},
+        "response_format": {"type": "json_schema", "json_schema": OCR_RESPONSE_SCHEMA},
     }
-    # 3-tier fallback: json_schema → json_object → no format (vài model không nhận strict
-    # mode hoặc json_schema; rớt dần đến khi 2xx).
-    with httpx.Client(timeout=120) as client:
-        resp = client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-        )
-        if resp.status_code >= 400:
-            payload["response_format"] = {"type": "json_object"}
-            resp = client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=payload,
-            )
-        if resp.status_code >= 400:
-            payload.pop("response_format", None)
-            resp = client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=payload,
-            )
-    resp.raise_for_status()
-    text = resp.json()["choices"][0]["message"]["content"].strip()
-    text = re.sub(r"^```[a-z]*\n?", "", text)
-    text = re.sub(r"\n?```$", "", text)
     try:
+        text = _call_classify_api(payload)
+        text = re.sub(r"^```[a-z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
         d = json.loads(text)
         if isinstance(d, dict):
             d.setdefault("extracted", {})
             return d
         return {"doc_type": "", "person": [], "summary_vi": str(d)[:300], "key_fields": {}, "extracted": {}}
-    except Exception:
-        return {"doc_type": "", "person": [], "summary_vi": text[:300], "key_fields": {}, "extracted": {}}
+    except Exception as e:  # noqa: BLE001
+        return {"doc_type": "", "person": [], "summary_vi": f"(classify lỗi: {type(e).__name__}: {e})", "key_fields": {}, "extracted": {}}
 
 
-def _ocr_one_with_retry(path: Path, src_name: str, retries: int = 2) -> dict | None:
-    """Gọi Gemini OCR 1 file, retry vài lần. Trả dict (kể cả dict fallback rỗng) hoặc None nếu vẫn raise."""
-    last_err = None
-    for i in range(1, retries + 1):
-        try:
-            return gemini_classify_file(path, src_name)
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            if i < retries:
-                time.sleep(min(2 ** i, 15))
-    log(f"  OCR prefetch lỗi cho {src_name}: {type(last_err).__name__}: {last_err} — sẽ thử lại tuần tự ở process_one")
-    return None
+def _docai_ocr_one(path: "Path", src_name: str) -> "list[dict] | None":
+    """OCR 1 file bằng DocAI, trả pages_text hoặc None."""
+    try:
+        from lib.docai_client import ocr_with_docai
+        return ocr_with_docai(path)
+    except Exception as e:  # noqa: BLE001
+        log(f"  DocAI OCR lỗi cho {src_name}: {type(e).__name__}: {e}")
+        return None
 
 
-def ocr_prefetch(files: list, *, dry_run: bool, workers: int) -> dict:
-    """OCR ĐỒNG THỜI mọi file OCR-được trong batch → {src_name: gem(dict) | None}.
-    File không OCR được (ext lạ) hoặc khi --dry-run: bỏ qua (không thêm vào dict). 1 file lỗi không phá batch."""
-    todo = [(p, n) for (p, n) in files if (not dry_run) and p.suffix.lower() in OCR_EXT_MIME]
+def docai_prefetch(files: list, *, dry_run: bool, workers: int) -> dict:
+    """DocAI OCR ĐỒNG THỜI mọi file OCR-được → {src_name: pages_text | None}.
+    File không OCR được (ext lạ) hoặc khi --dry-run: bỏ qua (không thêm vào dict)."""
+    todo = [(p, n) for (p, n) in files if (not dry_run) and p.suffix.lower() in DOCAI_OCR_EXTS]
     if not todo:
         return {}
     n_workers = max(1, min(workers, len(todo)))
-    log(f"OCR song song: {len(todo)} file, {n_workers} luồng …")
+    log(f"DocAI OCR song song: {len(todo)} file, {n_workers} luồng …")
     out: dict = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
-        fut_to_name = {ex.submit(_ocr_one_with_retry, p, n): n for (p, n) in todo}
+        fut_to_name = {ex.submit(_docai_ocr_one, p, n): n for (p, n) in todo}
         for fut in concurrent.futures.as_completed(fut_to_name):
             name = fut_to_name[fut]
             try:
                 out[name] = fut.result()
-            except Exception as e:  # noqa: BLE001 — không nên xảy ra (đã bọc bên trong), nhưng cho chắc
-                log(f"  OCR prefetch future lỗi cho {name}: {type(e).__name__}: {e}")
+            except Exception as e:  # noqa: BLE001
+                log(f"  DocAI prefetch future lỗi cho {name}: {type(e).__name__}: {e}")
                 out[name] = None
-    ok = sum(1 for v in out.values() if isinstance(v, dict))
-    log(f"OCR song song xong: {ok}/{len(out)} ok" + ("" if ok == len(out) else f" ({len(out) - ok} sẽ thử lại tuần tự)"))
+    ok = sum(1 for v in out.values() if isinstance(v, list))
+    log(f"DocAI OCR xong: {ok}/{len(out)} ok" + ("" if ok == len(out) else f" ({len(out) - ok} sẽ thử lại tuần tự)"))
     return out
-
-
-def _deepseek_batch_classify(ocr_cache: dict, applicant: str = "") -> dict:
-    """1 batch call CLASSIFY_MODEL (text-only) để re-classify tất cả file sau Gemini OCR.
-
-    Input : {src_name: gem_dict} (ocr_cache sau prefetch)
-    Output: {src_name: {"tag": "...", "subject": "...", "folder": "..."}}
-    Fail-safe: trả {} nếu lỗi → caller dùng classify_doc_type() regex như cũ.
-    """
-    if not CLASSIFY_MODEL or not ocr_cache:
-        return {}
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if deepseek_key:
-        api_endpoint = "https://api.deepseek.com/v1/chat/completions"
-        api_key = deepseek_key
-        classify_model = CLASSIFY_MODEL.split("/", 1)[1] if CLASSIFY_MODEL.startswith("deepseek/") else CLASSIFY_MODEL
-    elif openrouter_key:
-        api_endpoint = "https://openrouter.ai/api/v1/chat/completions"
-        api_key = openrouter_key
-        classify_model = CLASSIFY_MODEL
-    else:
-        return {}
-
-    try:
-        from lib.rule_loader import load_doc_types, generate_doc_type_catalog
-        _doc_types = load_doc_types()
-        tag_to_folder = {dt.tag: dt.folder for dt in _doc_types}
-        catalog = generate_doc_type_catalog(_doc_types)
-    except Exception as e:  # noqa: BLE001
-        log(f"_deepseek_batch_classify: không load doc_types ({e}) — skip")
-        return {}
-
-    # Build danh sách file gọn cho prompt
-    file_entries = []
-    names_in_order = []
-    for src_name, gem in ocr_cache.items():
-        if not isinstance(gem, dict):
-            continue
-        person = gem.get("person", [])
-        person_name = ""
-        gemini_relation = ""
-        if isinstance(person, list) and person and isinstance(person[0], dict):
-            person_name = person[0].get("full_name", "")
-            gemini_relation = person[0].get("relation", "")
-        ext_brief = {k: v for k, v in (gem.get("extracted") or {}).items()
-                     if k in ("ho_ten", "chu_tai_khoan", "ten_cong_ty", "la_to_khai", "la_anh_the",
-                               "ho_ten_cha", "ho_ten_me", "ho_ten_vo_chong")}
-        file_entries.append(
-            f'- file: {json.dumps(src_name, ensure_ascii=False)}\n'
-            f'  doc_type_raw: {json.dumps(gem.get("doc_type", ""), ensure_ascii=False)}\n'
-            f'  summary: {json.dumps(str(gem.get("summary_vi", ""))[:300], ensure_ascii=False)}\n'
-            f'  person: {json.dumps(person_name, ensure_ascii=False)}\n'
-            f'  gemini_relation: {json.dumps(gemini_relation, ensure_ascii=False)}\n'
-            f'  extracted: {json.dumps(ext_brief, ensure_ascii=False)}'
-        )
-        names_in_order.append(src_name)
-
-    if not file_entries:
-        return {}
-
-    _applicant_line = f'Đương đơn chính (applicant): "{applicant}"\n\n' if applicant else ""
-    prompt = (
-        "Bạn là chuyên gia phân loại hồ sơ visa Canada.\n"
-        "Dựa vào thông tin OCR của từng file, xác định TAG, họ tên chủ thẻ, và quan hệ với đương đơn chính.\n\n"
-        f"{_applicant_line}"
-        f"# CATALOG TAG (chỉ được chọn tag có trong danh sách này):\n{catalog or '(không load được)'}\n\n"
-        "# CÁC FILE CẦN PHÂN LOẠI:\n" + "\n".join(file_entries) + "\n\n"
-        "# OUTPUT: JSON object, key = tên file (giữ nguyên ký tự), value = object:\n"
-        '  {"tag": "<tag SOP>", "subject": "<họ tên chủ thẻ ASCII không dấu, rỗng nếu không rõ>",\n'
-        '   "relation": "<quan hệ với đương đơn: bo|me|vo|chong|con|anh_chi_em|khac|applicant|rỗng>"}\n'
-        "Quy tắc relation:\n"
-        '  - "applicant": file là của chính đương đơn (subject gần = tên đương đơn)\n'
-        '  - "bo"/"me"/"vo"/"chong"/"con"/"anh_chi_em": chỉ khi summary/extracted ghi RÕ quan hệ\n'
-        '  - "": không xác định được\n'
-        "Chỉ trả JSON thuần không markdown, không giải thích."
-    )
-
-    import httpx
-    try:
-        payload: dict = {
-            "model": classify_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-        }
-        with httpx.Client(timeout=60) as client:
-            resp = client.post(
-                api_endpoint,
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=payload,
-            )
-            if resp.status_code >= 400:
-                payload.pop("response_format", None)
-                resp = client.post(
-                    api_endpoint,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json=payload,
-                )
-        resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"].strip()
-        text = re.sub(r"^```[a-z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text)
-        result = json.loads(text)
-        if not isinstance(result, dict):
-            return {}
-        out: dict = {}
-        for src_name, hint in result.items():
-            if not isinstance(hint, dict):
-                continue
-            tag = str(hint.get("tag", "")).strip()
-            if not tag or tag not in tag_to_folder:
-                continue
-            _valid_relations = {"bo","me","vo","chong","con","anh_chi_em","khac","applicant",""}
-            raw_rel = str(hint.get("relation", "")).strip().lower()
-            out[src_name] = {
-                "tag": tag,
-                "subject": str(hint.get("subject", "")).strip(),
-                "folder": tag_to_folder[tag],
-                "relation": raw_rel if raw_rel in _valid_relations else "",
-            }
-        log(f"DeepSeek batch classify ({CLASSIFY_MODEL}): {len(out)}/{len(names_in_order)} file OK")
-        return out
-    except Exception as e:  # noqa: BLE001
-        log(f"_deepseek_batch_classify lỗi ({type(e).__name__}: {e}) — fallback classify_doc_type()")
-        return {}
 
 
 # ============================================================================
 # Document AI + DeepSeek unified planning flow (PDF)
 # ============================================================================
+_EXISTING_DOCS_CACHE: dict[str, list[dict]] = {}  # cleared at run start, keyed by case_folder_id
+
+
 def _fetch_existing_docs(case_folder_id: str) -> list[dict]:
     """Đọc tất cả .json sidecar trong _Bot OCR & Metadata của case.
     Trả list[{"filename":…, "tag":…, "relation":…}] để inject vào prompt DeepSeek
-    giúp nó biết hồ sơ đã có gì (quan trọng khi khách gửi lắc nhắc nhiều lần)."""
+    giúp nó biết hồ sơ đã có gì (quan trọng khi khách gửi lắc nhắc nhiều lần).
+    Kết quả cache trong _EXISTING_DOCS_CACHE để tránh gọi Drive nhiều lần trong 1 batch."""
     if not case_folder_id:
         return []
+    if case_folder_id in _EXISTING_DOCS_CACHE:
+        return _EXISTING_DOCS_CACHE[case_folder_id]
     try:
         from lib.drive_helpers import get_or_create_folder, list_folder, download_file_text
         meta_id = get_or_create_folder(OCR_META_FOLDER, case_folder_id, drive_id=SHARED_DRIVE_ID)
@@ -536,6 +362,7 @@ def _fetch_existing_docs(case_folder_id: str) -> list[dict]:
                     })
             except Exception:  # noqa: BLE001
                 continue
+        _EXISTING_DOCS_CACHE[case_folder_id] = existing
         return existing
     except Exception as e:  # noqa: BLE001
         log(f"  _fetch_existing_docs lỗi ({type(e).__name__}: {e}) — bỏ qua context cũ")
@@ -543,21 +370,22 @@ def _fetch_existing_docs(case_folder_id: str) -> list[dict]:
 
 
 def _docai_ocr_pdf(path: Path) -> list[dict] | None:
-    """OCR 1 PDF bằng Google Document AI, trả pages_text hoặc None để caller fallback."""
+    """OCR 1 PDF bằng Google Document AI, trả pages_text hoặc None."""
     try:
-        from lib.docai_client import ocr_pdf_with_docai
+        from lib.docai_client import ocr_with_docai
         log(f"  DocAI OCR: {path.name} …")
-        pages_text = ocr_pdf_with_docai(path)
+        pages_text = ocr_with_docai(path)
         if not pages_text:
-            log("  DocAI OCR: trả [] — fallback sang Gemini flow")
+            log("  DocAI OCR: trả [] — skip file")
             return None
         log(f"  DocAI OCR xong: {len(pages_text)} trang")
         return pages_text
     except Exception as e:  # noqa: BLE001
-        log(f"  DocAI OCR lỗi ({type(e).__name__}: {e}) — fallback sang Gemini flow")
+        log(f"  DocAI OCR lỗi ({type(e).__name__}: {e}) — skip")
         return None
 
 
+@functools.lru_cache(maxsize=1)
 def _docai_catalog_context() -> tuple[dict, str, str] | None:
     """Load doc-type catalog + relation whitelist for DocAI planning prompts."""
     try:
@@ -590,19 +418,19 @@ def _clean_applicant_for_prompt(applicant: str) -> str:
 
 
 def _docai_plan_api_call(prompt: str, *, timeout: int = 180) -> dict | None:
-    """Call DeepSeek/OpenRouter planner. Caller validates schema."""
+    """Call gpt-5-mini planner. Caller validates schema."""
     import httpx
 
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
     openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if deepseek_key:
-        api_endpoint = "https://api.deepseek.com/v1/chat/completions"
-        api_key = deepseek_key
-        plan_model = os.environ.get("DOCAI_PLAN_DIRECT_MODEL", "deepseek-v4-pro")
+    plan_model = OCR_CLASSIFY_MODEL
+
+    if openai_key:
+        api_endpoint = "https://api.openai.com/v1/chat/completions"
+        api_key = openai_key
     elif openrouter_key:
         api_endpoint = "https://openrouter.ai/api/v1/chat/completions"
         api_key = openrouter_key
-        plan_model = DOCAI_PLAN_MODEL
     else:
         return None
 
@@ -763,20 +591,33 @@ def _build_docai_batch_plan_prompt(chunk: list[dict], applicant: str, case_folde
 
 
 def _docai_ocr_pdfs(pdf_files: list[tuple[Path, str]]) -> list[dict]:
-    """DocAI OCR từng PDF, trả list dict {file_id, path, src_name, pages_text}.
-    File OCR không ra kết quả (pages_text rỗng) → bỏ qua khỏi list trả về."""
-    ocr_items: list[dict] = []
-    for i, (path, src_name) in enumerate(pdf_files, 1):
-        log(f"[DocAI batch OCR {i}/{len(pdf_files)}] {src_name}")
-        pages_text = _docai_ocr_pdf(path)
-        if pages_text:
-            ocr_items.append({
-                "file_id": f"F{i}",
-                "path": path,
-                "src_name": src_name,
-                "pages_text": pages_text,
-            })
-    return ocr_items
+    """DocAI OCR tất cả PDF SONG SONG (ThreadPool), trả list dict {file_id, path, src_name, pages_text}.
+    File OCR không ra kết quả (pages_text rỗng) → bỏ qua khỏi list trả về.
+    DocAI client tạo mới mỗi call (không shared state) → an toàn thread."""
+    if not pdf_files:
+        return []
+    n_workers = max(1, min(OCR_WORKERS, len(pdf_files)))
+    log(f"DocAI OCR song song: {len(pdf_files)} PDF, {n_workers} luồng …")
+    results: dict[str, dict] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+        fut_map = {
+            ex.submit(_docai_ocr_pdf, path): (i, path, src_name)
+            for i, (path, src_name) in enumerate(pdf_files, 1)
+        }
+        for fut in concurrent.futures.as_completed(fut_map):
+            i, path, src_name = fut_map[fut]
+            try:
+                pages_text = fut.result()
+            except Exception as e:  # noqa: BLE001
+                log(f"  DocAI OCR future lỗi cho {src_name}: {type(e).__name__}: {e}")
+                pages_text = None
+            if pages_text:
+                results[src_name] = {"file_id": f"F{i}", "path": path,
+                                     "src_name": src_name, "pages_text": pages_text}
+    ok = len(results)
+    log(f"DocAI OCR song song xong: {ok}/{len(pdf_files)} ok")
+    # Giữ thứ tự gốc để file_id deterministic và batch-plan prompt nhất quán
+    return [results[n] for _, n in pdf_files if n in results]
 
 
 def _docai_batch_plan_pdfs(ocr_items: list[dict], applicant: str,
@@ -787,7 +628,7 @@ def _docai_batch_plan_pdfs(ocr_items: list[dict], applicant: str,
     Returns {src_name: {documents: [...], _pages_text: [...]}}. Any missing src_name
     is intentionally handled by caller with the old per-file fallback.
     """
-    if not DOCAI_BATCH_PLAN or len(ocr_items) < 2:
+    if len(ocr_items) < 2:
         return {}
     ctx = _docai_catalog_context()
     if not ctx:
@@ -914,26 +755,7 @@ def _execute_plan(plan_docs: list[dict], path: Path, src_name: str,
         try:
             seg_path = _split_pdf_pages(path, tu_trang, den_trang)
 
-            # Nếu needs_vision → Gemini Vision để xác nhận classify + extract
             gem: dict = {}
-            if needs_vision:
-                try:
-                    log(f"       [DocAI plan] {seg_src}: needs_vision → Gemini Vision classify")
-                    gem = gemini_classify_file(seg_path, filename)
-                    if isinstance(gem, dict) and gem.get("doc_type"):
-                        from lib.sop_naming import Classification as _Cls
-                        from lib.rule_loader import load_doc_types as _ldt
-                        _tag_map = {dt.tag: dt.folder for dt in _ldt()}
-                        from lib.sop_naming import classify_doc_type as _cdt
-                        _cls = _cdt(gem.get("doc_type", ""), str(gem.get("summary_vi", "")), filename,
-                                    extracted=gem.get("extracted"))
-                        if _cls.tag != "Khac":
-                            tag = _cls.tag
-                            folder = _cls.folder
-                        subject = subject or (gem.get("person", [{}]) or [{}])[0].get("full_name", subject)
-                except Exception as e:  # noqa: BLE001
-                    log(f"       [DocAI plan] Gemini Vision lỗi ({type(e).__name__}: {e}) — giữ plan tag")
-                    gem = {}
 
             if not isinstance(gem, dict):
                 gem = {}
@@ -985,7 +807,7 @@ def _execute_plan(plan_docs: list[dict], path: Path, src_name: str,
 
             summary = (str(gem.get("summary_vi", "")) if gem else "") or _docai_seg_text
             summary = summary[:2000]  # checklist đọc tối đa 800 char — cho nhiều hơn để đủ data
-            needs_review = (confidence == "low") or needs_vision
+            needs_review = (confidence == "low")
 
             item: dict = {
                 "src_name": seg_src, "split_from": src_name,
@@ -1016,7 +838,7 @@ def _execute_plan(plan_docs: list[dict], path: Path, src_name: str,
                       f"**Loại:** {tag} | **Folder:** {folder}\n"
                       f"**Người:** {subject_title} | **Confidence:** {confidence}{review_tag}\n"
                       f"**File gốc:** {src_name} (trang {tu_trang}-{den_trang})\n"
-                      f"**Phân loại bởi:** Document AI + {DOCAI_PLAN_MODEL}\n\n"
+                      f"**Phân loại bởi:** Document AI + {OCR_CLASSIFY_MODEL}\n\n"
                       f"## Lý do\n{doc.get('reason', '(DocAI plan)')}\n")
                 if summary:
                     md += f"\n## Tóm tắt\n{summary}\n"
@@ -1089,37 +911,6 @@ def dedup_name(name_registry: dict, tag: str, subject_title: str, ext: str,
                           relation=relation, index=(n if n > 1 else None), is_english=is_english)
 
 
-# ============================================================================
-# Fix 5 — Page-by-page 2-pass OCR cho multi-page PDF (multi-doc).
-# Pass 1: rasterize từng trang → flash classify (cheap, chỉ doc_type + ten_chu_the).
-# Group: trang liên tiếp cùng (doc_type, ten_chu_the) → segment.
-# Pass 2: split PDF + full OCR per segment (do caller chạy qua process_one).
-# ============================================================================
-PAGE_CLASSIFY_MODEL = os.environ.get("PAGE_CLASSIFY_MODEL", "google/gemini-2.5-flash")
-# P1.1: escalate model — chạy lại các trang Khac/low-conf để diệt bug "11 trang Passport".
-PAGE_CLASSIFY_PRO_MODEL = os.environ.get("PAGE_CLASSIFY_PRO_MODEL", "google/gemini-2.5-pro")
-# Ngưỡng escalate: nếu ≥30% trang có confidence low → batch escalate qua pro.
-PAGE_CLASSIFY_PRO_RATIO = float(os.environ.get("PAGE_CLASSIFY_PRO_RATIO", "0.20"))
-# Fix D — Force Pro cho Pass 1 ngay từ đầu nếu PDF ≥N trang. Flash confident-wrong trên batch lớn
-# (vd 53 trang multi-doc bị nhận là 1 XNCT). Pro chậm hơn + tốn $0.16/53-trang nhưng chính xác.
-PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES = int(os.environ.get("PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES", "10"))
-SCAN_DPI = int(os.environ.get("SCAN_DPI", "150"))
-PAGE_CLASSIFY_SCHEMA = {
-    "name": "page_classify",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "doc_type":    {"type": "string"},
-            "ten_chu_the": {"type": "string"},
-            "confidence":  {"type": "string"},  # P1.1: high|medium|low
-        },
-        "required": ["doc_type"],
-        "additionalProperties": True,
-    },
-}
-
-
 def _count_pdf_pages(path: Path) -> int:
     """Đếm số trang PDF. Trả 0 nếu lỗi (file corrupt / không phải PDF)."""
     try:
@@ -1128,164 +919,6 @@ def _count_pdf_pages(path: Path) -> int:
     except Exception as e:  # noqa: BLE001
         log(f"  _count_pdf_pages({path.name}) lỗi: {type(e).__name__}: {e}")
         return 0
-
-
-def _rasterize_page_to_jpg_b64(path: Path, page_idx: int, dpi: int | None = None) -> str:
-    """Render trang `page_idx` (0-based) thành JPEG, trả base64. Cho Pass 1 cheap classify."""
-    if not _HAS_PIL:
-        raise RuntimeError(
-            "Pillow chưa cài — bỏ qua multi-page split. "
-            "Fix: pip3 install --user --break-system-packages Pillow"
-        )
-    import io
-    import pypdfium2 as pdfium
-    _dpi = dpi if dpi is not None else SCAN_DPI
-    pdf = pdfium.PdfDocument(str(path))
-    try:
-        page = pdf[page_idx]
-        bitmap = page.render(scale=_dpi / 72.0)
-        img = bitmap.to_pil()
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode()
-    finally:
-        pdf.close()
-
-
-def _gemini_quick_classify_page(img_b64: str, page_no: int,
-                                 model: str | None = None) -> dict:
-    """Pass 1 — classify 1 trang ảnh: trả {doc_type, ten_chu_the, confidence}.
-    P1.1 fix: KHÔNG được trả `doc_type=""`. Khi không chắc → trả `"Khac"` + confidence="low".
-    Caller (`detect_pdf_segments`) sẽ escalate batch Khac/low qua PAGE_CLASSIFY_PRO_MODEL."""
-    import httpx
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        return {"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"}
-    prompt = (
-        f"Đây là TRANG {page_no} của một file PDF có thể gộp nhiều loại giấy tờ visa Canada. "
-        "Phân loại CHỈ trang này theo BẢN CHẤT (vd: 'Căn cước công dân' / 'Hộ chiếu' / "
-        "'Trích lục khai sinh' / 'Giấy đăng ký kết hôn' / 'Quyết định ly hôn' / "
-        "'Giấy chứng nhận quyền sử dụng đất' / 'Hợp đồng cho tặng đất' / 'Bằng cấp' / "
-        "'Học bạ' / 'Chứng chỉ tin học' / 'Trích lục cải chính hộ tịch' / "
-        "'Chứng nhận đăng ký xe' / 'Chứng nhận hiến máu' / 'Sao kê ngân hàng' / 'Sổ tiết kiệm' / "
-        "'Xác nhận số dư' / 'Hợp đồng lao động' / 'Hợp đồng thuê mặt bằng' / "
-        "'Đăng ký kinh doanh' / 'BHYT' / 'BHXH' / 'Lý lịch tư pháp' / "
-        "'Xác nhận cư trú' / 'Xác nhận tình trạng hôn nhân' / 'Xác nhận đất nông nghiệp' / "
-        "'Giấy xác nhận học sinh' / 'Sơ yếu lý lịch' / 'Khám sức khỏe' / "
-        "'Ảnh thẻ' / 'Ảnh gia đình' / 'Khac'). "
-        'Trả JSON 1 dòng: {"doc_type":"<loại>","ten_chu_the":"<họ tên người trên giấy đó nếu thấy>","confidence":"high|medium|low"}. '
-        "Nếu trang là continuation của giấy ở trang trước (cùng loại, cùng người) → trả loại + tên đó + confidence=high. "
-        "⚠️ KHÔNG được trả doc_type rỗng. Khi không chắc / trang trắng / mờ → trả doc_type='Khac' + confidence='low'. "
-        "Lưu ý: tài liệu hành chính VN thường có dấu đỏ tròn/oval ghi tên cơ quan cấp — đọc kỹ dấu để xác định loại giấy khi chữ mờ."
-    )
-    payload = {
-        "model": model or PAGE_CLASSIFY_MODEL,
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-        ]}],
-        "temperature": 0.1,
-        "response_format": {"type": "json_schema", "json_schema": PAGE_CLASSIFY_SCHEMA},
-    }
-    with httpx.Client(timeout=60) as client:
-        resp = client.post("https://openrouter.ai/api/v1/chat/completions",
-                           headers={"Authorization": f"Bearer {api_key}"}, json=payload)
-        if resp.status_code >= 400:
-            payload["response_format"] = {"type": "json_object"}
-            resp = client.post("https://openrouter.ai/api/v1/chat/completions",
-                               headers={"Authorization": f"Bearer {api_key}"}, json=payload)
-        if resp.status_code >= 400:
-            payload.pop("response_format", None)
-            resp = client.post("https://openrouter.ai/api/v1/chat/completions",
-                               headers={"Authorization": f"Bearer {api_key}"}, json=payload)
-    resp.raise_for_status()
-    text = resp.json()["choices"][0]["message"]["content"].strip()
-    text = re.sub(r"^```[a-z]*\n?", "", text)
-    text = re.sub(r"\n?```$", "", text)
-    try:
-        d = json.loads(text)
-        if isinstance(d, dict):
-            dt = str(d.get("doc_type", "")).strip() or "Khac"   # P1.1: rỗng → Khac
-            conf = str(d.get("confidence", "")).strip().lower()
-            if conf not in ("high", "medium", "low"):
-                # Suy ra confidence: nếu Khac → low; nếu rõ loại → medium (flash dùng medium default).
-                conf = "low" if dt.lower() == "khac" else "medium"
-            return {"doc_type": dt,
-                    "ten_chu_the": str(d.get("ten_chu_the", "")).strip(),
-                    "confidence": conf}
-    except Exception:  # noqa: BLE001
-        pass
-    return {"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"}
-
-
-def _names_clearly_differ(a: str, b: str) -> bool:
-    """RÕ RÀNG 2 người khác nhau (cùng doc_type nhưng KHÁC PERSON) → buộc split.
-
-    Đừng nhầm: Gemini OCR có thể đọc khác chữ giữa 2 trang của CÙNG 1 người (vd
-    đánh máy → "Hoàng Thị Mơ" vs "Hoang Thi Mo"). Chỉ coi là KHÁC NGƯỜI khi:
-    - Cả 2 tên non-empty
-    - HỌ (token đầu) ≠ — vd "Hoang" vs "Au" → khác họ → chắc chắn khác người
-    HOẶC
-    - Tên CUỐI (token cuối) khác RÕ — vd "Mơ" (Mo) vs "Huyền" (Huyen)
-    """
-    try:
-        from lib.sop_naming import strip_diacritics
-    except ImportError:
-        from sop_naming import strip_diacritics  # type: ignore  # noqa
-    a = strip_diacritics(a or "").lower().strip()
-    b = strip_diacritics(b or "").lower().strip()
-    if not a or not b or a == b:
-        return False
-    at = a.split()
-    bt = b.split()
-    if not at or not bt:
-        return False
-    # Khác họ (token đầu) → CHẮC CHẮN khác người
-    if at[0] != bt[0]:
-        return True
-    # Cùng họ, khác tên cuối + tên cuối đủ dài (≥3 chars để tránh OCR typo 1-2 char) → khác người
-    if len(at) >= 2 and len(bt) >= 2:
-        if at[-1] != bt[-1] and min(len(at[-1]), len(bt[-1])) >= 3:
-            return True
-    return False
-
-
-def _group_consecutive(pages_class: list[dict]) -> list[dict]:
-    """Gom các trang liên tiếp cùng doc_type → segment. Cắt khi:
-    - doc_type khác (loại giấy đổi)
-    - HOẶC cùng doc_type nhưng `ten_chu_the` rõ ràng KHÁC NGƯỜI (vd 1 PDF gộp CCCD KH +
-      CCCD bố mẹ — cùng tag CCCD nhưng khác họ → phải split để tránh sidecar trộn dữ liệu).
-
-    P1.1 fix: page với doc_type="Khac" KHÔNG còn được xem là continuation. Mỗi run trang
-    Khac liên tiếp trở thành 1 segment riêng — caller sẽ escalate qua pro model để xác định
-    đúng loại. Cách này phá bug "11 trang Passport gộp tất cả CCCD/sổ đất/khai sinh"."""
-    if not pages_class:
-        return []
-    def _dt(p: dict) -> str:
-        return (p.get("doc_type") or "").strip().lower()
-    segments: list[dict] = []
-    cur_dt = _dt(pages_class[0]) or "khac"   # P1.1: safety
-    cur_name = (pages_class[0].get("ten_chu_the") or "").strip()
-    cur_start = 1
-    for i, p in enumerate(pages_class[1:], start=2):
-        k = _dt(p) or "khac"
-        nm = (p.get("ten_chu_the") or "").strip()
-        # P1.1: bất kỳ thay đổi doc_type nào (kể cả vào/ra "khac") đều split.
-        diff_type = k != cur_dt
-        diff_person = k == cur_dt and k not in ("khac", "") and _names_clearly_differ(cur_name, nm)
-        if diff_type or diff_person:
-            seed = pages_class[cur_start - 1]
-            segments.append({"tu_trang": cur_start, "den_trang": i - 1,
-                             "doc_type": seed.get("doc_type", "") or "Khac",
-                             "ten_chu_the": seed.get("ten_chu_the", "")})
-            cur_dt = k
-            cur_name = nm
-            cur_start = i
-    seed = pages_class[cur_start - 1]
-    segments.append({"tu_trang": cur_start, "den_trang": len(pages_class),
-                     "doc_type": seed.get("doc_type", "") or "Khac",
-                     "ten_chu_the": seed.get("ten_chu_the", "")})
-    return segments
 
 
 def _split_pdf_pages(path: Path, tu_trang: int, den_trang: int) -> Path:
@@ -1300,74 +933,6 @@ def _split_pdf_pages(path: Path, tu_trang: int, den_trang: int) -> Path:
     with tmp.open("wb") as fh:
         writer.write(fh)
     return tmp
-
-
-def detect_pdf_segments(path: Path) -> list[dict]:
-    """Pass 1: classify từng trang của PDF nhiều trang → trả list segments.
-    Nếu PDF ≤1 trang hoặc chỉ 1 segment (file đơn doc): trả [] (caller dùng single-doc flow).
-
-    P1.1: nếu ≥30% trang ra "Khac"/low-conf, escalate những trang đó qua
-    PAGE_CLASSIFY_PRO_MODEL (gemini-2.5-pro 1 batch) để re-classify. Diệt bug
-    "11 trang gộp Passport" khi Flash bị choke ở giữa file đa loại.
-
-    Fix D: PDF dài (≥PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES) dùng Pro ngay từ Pass 1, không qua Flash.
-    Lý do: Flash hay confident-wrong trên batch nhiều trang cùng phông (vd 53 trang multi-doc
-    bị Flash classify là 1 XNCT → P1.1 escalate không trigger vì không có trang low-conf).
-    """
-    n_pages = _count_pdf_pages(path)
-    if n_pages <= 1:
-        return []
-    # Fix D — chọn model cho Pass 1 dựa vào độ dài PDF.
-    use_pro_for_pass1 = n_pages >= PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES
-    pass1_model = PAGE_CLASSIFY_PRO_MODEL if use_pro_for_pass1 else None
-    if use_pro_for_pass1:
-        log(f"  page-classify Pass 1 FORCE-PRO: {n_pages} trang ≥ {PAGE_CLASSIFY_FORCE_PRO_MIN_PAGES} → {PAGE_CLASSIFY_PRO_MODEL}")
-    # Rasterize 1 lần, dùng lại nếu phải escalate.
-    rendered: list[str | None] = []
-    for i in range(n_pages):
-        try:
-            rendered.append(_rasterize_page_to_jpg_b64(path, i))
-        except Exception as e:  # noqa: BLE001
-            log(f"  rasterize lỗi page={i+1}: {type(e).__name__}: {e}")
-            rendered.append(None)
-            # Nếu Pillow thiếu hoặc lỗi hệ thống chung → khỏi spam N dòng, bail out.
-            if isinstance(e, (RuntimeError, ModuleNotFoundError, ImportError)):
-                log(f"  rasterize bỏ qua {n_pages - i - 1} trang còn lại → multi-page split disabled cho file này")
-                rendered.extend([None] * (n_pages - i - 1))
-                break
-    pages_class: list[dict] = []
-    for i in range(n_pages):
-        img_b64 = rendered[i]
-        if img_b64 is None:
-            pages_class.append({"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"})
-            continue
-        try:
-            c = _gemini_quick_classify_page(img_b64, page_no=i + 1, model=pass1_model)
-        except Exception as e:  # noqa: BLE001
-            log(f"  page-classify lỗi page={i+1}: {type(e).__name__}: {e}")
-            c = {"doc_type": "Khac", "ten_chu_the": "", "confidence": "low"}
-        pages_class.append(c)
-
-    # P1.1 escalation: re-classify trang Khac / low qua pro model.
-    # Fix D — skip nếu Pass 1 đã dùng Pro (không escalate lên cùng model).
-    if not use_pro_for_pass1:
-        low_idx = [i for i, p in enumerate(pages_class)
-                   if (p.get("doc_type") or "").strip().lower() in ("khac", "") or p.get("confidence") == "low"]
-        if low_idx and len(low_idx) >= max(2, int(n_pages * PAGE_CLASSIFY_PRO_RATIO)):
-            log(f"  page-classify escalate: {len(low_idx)}/{n_pages} trang low-conf → {PAGE_CLASSIFY_PRO_MODEL}")
-            for i in low_idx:
-                if rendered[i] is None:
-                    continue
-                try:
-                    c = _gemini_quick_classify_page(rendered[i], page_no=i + 1, model=PAGE_CLASSIFY_PRO_MODEL)
-                    # Chỉ overwrite nếu pro cho confidence ≥ medium (tránh thay Khac/low bằng Khac/low khác)
-                    if c.get("confidence") in ("high", "medium") and (c.get("doc_type") or "").strip().lower() not in ("", "khac"):
-                        pages_class[i] = c
-                except Exception as e:  # noqa: BLE001
-                    log(f"  page-classify pro lỗi page={i+1}: {type(e).__name__}: {e}")
-
-    segments = _group_consecutive(pages_class)
-    return segments if len(segments) >= 2 else []
 
 
 # ============================================================================
@@ -1504,19 +1069,22 @@ def scan_da_duyet_folder(case_folder_id: str, applicant: str, case_id: str) -> N
         if sidecar_name in existing_meta:
             continue  # đã OCR lần trước
         ext = Path(filename).suffix.lower()
-        if ext not in OCR_EXT_MIME and ext not in OTHER_EXT_MIME:
+        if ext not in DOCAI_OCR_EXTS and ext not in OTHER_EXT_MIME:
             continue
         log(f"  da-duyet: OCR {filename}")
         try:
             data = download_file_bytes(fid, drive_id=SHARED_DRIVE_ID)
             content_hash = hashlib.sha1(data).hexdigest()
             gem: dict = {}
-            if ext in OCR_EXT_MIME:
+            if ext in DOCAI_OCR_EXTS:
                 with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
                     tmp.write(data)
                     tmp_path = Path(tmp.name)
                 try:
-                    gem = gemini_classify_file(tmp_path, filename) or {}
+                    from lib.docai_client import ocr_with_docai
+                    _pages = ocr_with_docai(tmp_path)
+                    if _pages:
+                        gem = docai_classify(_pages, filename, applicant) or {}
                 finally:
                     tmp_path.unlink(missing_ok=True)
             if not isinstance(gem, dict):
@@ -1533,8 +1101,8 @@ def scan_da_duyet_folder(case_folder_id: str, applicant: str, case_id: str) -> N
                 "tag": cls.tag, "folder": DA_DUYET_FOLDER,
                 "subject": subject, "relation": relation,
                 "confidence": cls.confidence, "needs_review": cls.needs_review,
-                "is_english": False, "ocr": ext in OCR_EXT_MIME,
-                "summary": summary, "extracted": extracted, "gemini": gem,
+                "is_english": False, "ocr": ext in DOCAI_OCR_EXTS,
+                "summary": summary, "extracted": extracted, "ocr_classify": gem,
                 "case_id": case_id, "source": "da-duyet",
                 "drive_link": f"https://drive.google.com/file/d/{fid}/view?usp=drivesdk",
                 "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1558,12 +1126,11 @@ def scan_da_duyet_folder(case_folder_id: str, applicant: str, case_id: str) -> N
 # ============================================================================
 def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: str,
                 case_id: str, retries: int, dry_run: bool, sop, name_registry: dict,
-                prefetched_gem: dict | None = None, force_rescan: bool = False,
-                ds_hint: dict | None = None) -> dict:
+                pages_text: list | None = None, force_rescan: bool = False) -> dict:
     classify_doc_type, build_filename, detect_english, title_case_ascii = sop
     ext = path.suffix.lower()
-    can_ocr = ext in OCR_EXT_MIME
-    mime = OCR_EXT_MIME.get(ext) or OTHER_EXT_MIME.get(ext) or "application/octet-stream"
+    can_ocr = ext in DOCAI_OCR_EXTS
+    mime = OTHER_EXT_MIME.get(ext) or "application/octet-stream"
 
     # Fix 7 — hash dedup: tính SHA-1 1 lần; nếu sidecar có hash khớp → skip upload, ko OCR lại.
     # P1.3 — `force_rescan` bypass dedup (cho /oldfile): bot re-OCR + re-classify, upload bản tên đúng.
@@ -1620,8 +1187,11 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
         try:
             gem: dict = {}
             if can_ocr and not dry_run:
-                # dùng kết quả OCR đã prefetch song song nếu có; nếu prefetch lỗi (None) thì gọi lại tuần tự (có retry).
-                gem = prefetched_gem if isinstance(prefetched_gem, dict) else gemini_classify_file(path, src_name)
+                _pages = pages_text if isinstance(pages_text, list) else None
+                if _pages is None:
+                    from lib.docai_client import ocr_with_docai
+                    _pages = ocr_with_docai(path)
+                gem = docai_classify(_pages, src_name, applicant) if _pages else {}
             if not isinstance(gem, dict):
                 gem = {"doc_type": "", "person": [], "summary_vi": str(gem)[:300], "key_fields": {}, "extracted": {}}
             gem.setdefault("key_fields", {})
@@ -1633,38 +1203,7 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
 
             raw_dt = gem.get("doc_type", "")
             summary = str(gem.get("summary_vi", ""))[:400]
-            # DeepSeek batch classify hint — bypass classify_doc_type() regex khi tag hợp lệ + không phải Khac.
-            # ds_hint được tính 1 lần cho cả batch trước vòng lặp process_one (text-only, không cần vision).
-            _ds_tag = (ds_hint or {}).get("tag", "")
-            _ds_subject = (ds_hint or {}).get("subject", "")
-            _ds_folder = (ds_hint or {}).get("folder", "")
-            _ds_relation = (ds_hint or {}).get("relation", None)  # None = chưa có → dùng extract_relation()
-            if _ds_tag and _ds_tag != "Khac" and _ds_folder:
-                from lib.sop_naming import Classification as _Cls
-                cls = _Cls(tag=_ds_tag, folder=_ds_folder, confidence="medium", needs_review=False)
-                log(f"  {src_name}: DeepSeek tag={_ds_tag!r} (bypass classify_doc_type regex)")
-            else:
-                cls = classify_doc_type(raw_dt, summary, src_name, extracted=gem.get("extracted"))
-                _ds_subject = ""  # không dùng subject từ ds nếu tag fallback
-            # P2.2 — escalate mọi file rơi về `Khac` (bất kể confidence) lên gemini-2.5-pro 1 call.
-            # Trước chỉ escalate "Khac+low". Mở rộng vì user feedback: nhiều file Medical/XNCT/HĐ
-            # bị Pass 4 bắt nhầm thành Khac với confidence=low — escalate-all diệt CV/Khac mặc định.
-            if can_ocr and not dry_run and attempt == 1 and cls.tag == "Khac":
-                try:
-                    gem2 = gemini_classify_file(path, src_name, model="google/gemini-2.5-pro")
-                    if isinstance(gem2, dict):
-                        gem2.setdefault("extracted", {})
-                        if not isinstance(gem2["extracted"], dict):
-                            gem2["extracted"] = {}
-                        raw_dt2 = gem2.get("doc_type", "")
-                        summary2 = str(gem2.get("summary_vi", ""))[:400]
-                        cls2 = classify_doc_type(raw_dt2, summary2, src_name, extracted=gem2.get("extracted"))
-                        if cls2.tag != "Khac" or cls2.confidence != "low":
-                            log(f"  {src_name}: escalated low-conf → {cls2.tag} ({cls2.confidence})")
-                            gem, raw_dt, summary, cls = gem2, raw_dt2, summary2, cls2
-                            gem["_escalated"] = True
-                except Exception as e:  # noqa: BLE001
-                    log(f"  {src_name}: escalation failed ({type(e).__name__}: {e})")
+            cls = classify_doc_type(raw_dt, summary, src_name, extracted=gem.get("extracted"))
             needs_review = cls.needs_review or (not can_ocr)
             # Nếu Gemini báo visual_flags chứa "viết tay" → needs_review để checklist không 🔴 false positives.
             _vflags = " ".join(str(f) for f in (gem.get("extracted") or {}).get("visual_flags", []))
@@ -1672,8 +1211,7 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
                 needs_review = True
             # P2.5 — `applicant` từ group_registry có thể kèm năm sinh ("Nguyen Thi Anh 1999").
             # Tên file phải sạch — strip năm trước khi dùng làm subject fallback.
-            # _ds_subject: họ tên từ DeepSeek (nếu có và tag đã dùng); ưu tiên trên Gemini person[]
-            subject_raw = (_ds_subject if _ds_subject else None) or subject_from_gemini(gem, applicant) or _strip_trailing_year(applicant)
+            subject_raw = subject_from_gemini(gem, applicant) or _strip_trailing_year(applicant)
             # P2.3 — MRZ override: với CCCD / Passport, nếu OCR thấy MRZ → tên parse từ MRZ
             # là GROUND TRUTH chủ thẻ. Diệt bug "stamp tên đương đơn lên CCCD người khác".
             if cls.tag in ("CCCD", "Passport") and isinstance(gem.get("extracted"), dict):
@@ -1699,12 +1237,8 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
             is_eng = detect_english(summary, "")
             # Quan hệ với đương đơn — P2.4 siết: whitelist doc_tag + ground truth từ extracted.
             from lib.sop_naming import extract_relation
-            if _ds_relation is not None and _ds_tag and _ds_tag != "Khac":
-                # DeepSeek đã đọc full context → dùng relation của nó; "applicant" → "" (không stamp vào tên)
-                relation = "" if _ds_relation == "applicant" else _ds_relation
-            else:
-                relation = extract_relation(applicant, subject_title, summary,
-                                            doc_tag=cls.tag, extracted=gem.get("extracted"))
+            relation = extract_relation(applicant, subject_title, summary,
+                                        doc_tag=cls.tag, extracted=gem.get("extracted"))
             # Only the first retry attempt may consume a registry slot per file;
             # build it once on attempt 1 and reuse it on later attempts.
             if attempt == 1 or "new_name" not in locals():
@@ -1718,7 +1252,7 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
                 "needs_review": needs_review, "is_english": is_eng,
                 "ocr": can_ocr, "summary": summary, "extracted": gem.get("extracted") or {},
                 "content_hash": content_hash,
-                "gemini": gem, "case_id": case_id,
+                "ocr_classify": gem, "case_id": case_id,
             }
 
             if dry_run:
@@ -1843,79 +1377,22 @@ def run_self_test() -> int:
     assert classify_doc_type("Ảnh chụp gia đình", "tiệc sinh nhật", "x.jpg").tag == "Anh gia dinh"
     # CCCD: ảnh chân dung in trên thẻ → vẫn CCCD, không bị cờ la_anh_the kéo thành "Anh the"
     assert classify_doc_type("Căn cước công dân", "thẻ căn cước có ảnh chân dung", "CCCD.pdf", extracted={"la_anh_the": True}).tag == "CCCD"
-    # OCR song song: prefetch bỏ qua file ext-lạ / dry-run / list rỗng (không chạm API), process_one nhận prefetched_gem
+    # DocAI OCR + gpt-5-mini classify sanity
     import inspect as _inspect
-    assert callable(ocr_prefetch) and "prefetched_gem" in _inspect.signature(process_one).parameters
-    assert ocr_prefetch([], dry_run=False, workers=3) == {}
-    assert ocr_prefetch([(Path("/nope/a.docx"), "a.docx")], dry_run=False, workers=2) == {}
-    assert ocr_prefetch([(Path("/nope/a.jpg"), "a.jpg")], dry_run=True, workers=2) == {}
-    print(f"OCR_WORKERS={OCR_WORKERS} | ocr_prefetch OK")
-    # Fix 0 — model + schema sanity
-    assert GEMINI_MODEL.endswith("flash") or "pro" in GEMINI_MODEL, GEMINI_MODEL
-    assert GEMINI_RESPONSE_SCHEMA["strict"] is True
-    assert "doc_type" in GEMINI_RESPONSE_SCHEMA["schema"]["properties"]
-    # Fix 6 — gemini_classify_file accepts `model` kwarg (giúp escalation)
-    import inspect as _inspect
-    assert "model" in _inspect.signature(gemini_classify_file).parameters
+    assert callable(docai_prefetch) and "pages_text" in _inspect.signature(process_one).parameters
+    assert docai_prefetch([], dry_run=False, workers=3) == {}
+    assert docai_prefetch([(Path("/nope/a.mov"), "a.mov")], dry_run=False, workers=2) == {}
+    assert docai_prefetch([(Path("/nope/a.jpg"), "a.jpg")], dry_run=True, workers=2) == {}
+    print(f"OCR_WORKERS={OCR_WORKERS} | docai_prefetch OK")
+    # schema sanity
+    assert OCR_CLASSIFY_MODEL, OCR_CLASSIFY_MODEL
+    assert OCR_RESPONSE_SCHEMA["strict"] is True
+    assert "doc_type" in OCR_RESPONSE_SCHEMA["schema"]["properties"]
+    assert callable(docai_classify)
     # Fix 7 — _find_sidecar_by_hash callable + miss case folder → None, không raise
     assert callable(_find_sidecar_by_hash)
     assert _find_sidecar_by_hash("", "abc") is None
     assert _find_sidecar_by_hash("nonexistent-folder", "") is None
-    # P1.1 — _group_consecutive: trang doc_type "" / "Khac" KHÔNG còn coi là continuation.
-    # Mỗi run pages "Khac" → segment riêng để caller (detect_pdf_segments) escalate qua pro model.
-    # Diệt bug "11 trang Passport gộp cả CCCD/sổ đất khi Flash trả rỗng pages 3-11".
-    g = _group_consecutive([
-        {"doc_type": "CCCD", "ten_chu_the": "A"},
-        {"doc_type": "CCCD", "ten_chu_the": "A"},
-        {"doc_type": "Bằng cấp", "ten_chu_the": "A"},
-        {"doc_type": "Bằng cấp", "ten_chu_the": "A"},
-        {"doc_type": "", "ten_chu_the": ""},                # trang trắng → segment Khac riêng
-        {"doc_type": "Trích lục khai sinh", "ten_chu_the": "B"},
-    ])
-    assert len(g) == 4, g    # P1.1 fix: 4 segments (CCCD/Bang/Khac/Trich luc)
-    assert g[0]["tu_trang"] == 1 and g[0]["den_trang"] == 2 and g[0]["doc_type"] == "CCCD"
-    assert g[1]["tu_trang"] == 3 and g[1]["den_trang"] == 4 and g[1]["doc_type"] == "Bằng cấp"
-    assert g[2]["tu_trang"] == 5 and g[2]["den_trang"] == 5 and g[2]["doc_type"] == "Khac"
-    assert g[3]["tu_trang"] == 6 and g[3]["den_trang"] == 6 and g[3]["doc_type"] == "Trích lục khai sinh"
-    # 1 doc duy nhất → 1 segment
-    g1 = _group_consecutive([{"doc_type": "CCCD"}] * 5)
-    assert len(g1) == 1 and g1[0]["den_trang"] == 5
-    # PDF rỗng → 0 segment
-    assert _group_consecutive([]) == []
-
-    # Bug fix #4: cùng doc_type nhưng KHÁC PERSON → buộc split
-    # Tình huống: 1 PDF gộp CCCD KH + CCCD bố/mẹ (đều CCCD nhưng khác họ tên)
-    g_multi_person = _group_consecutive([
-        {"doc_type": "Căn cước công dân", "ten_chu_the": "Hoàng Thị Mơ"},
-        {"doc_type": "Căn cước công dân", "ten_chu_the": "Hoàng Thị Mơ"},
-        {"doc_type": "Căn cước công dân", "ten_chu_the": "Âu Thị Huyền"},  # khác họ → split
-        {"doc_type": "Căn cước công dân", "ten_chu_the": "Âu Thị Huyền"},
-    ])
-    assert len(g_multi_person) == 2, g_multi_person
-    assert g_multi_person[0]["ten_chu_the"] == "Hoàng Thị Mơ"
-    assert g_multi_person[1]["ten_chu_the"] == "Âu Thị Huyền"
-
-    # Đừng false-positive: OCR đọc khác chữ giữa 2 trang cùng NGƯỜI → KHÔNG split
-    g_same_person_typo = _group_consecutive([
-        {"doc_type": "Hộ chiếu", "ten_chu_the": "Hoàng Thị Mơ"},
-        {"doc_type": "Hộ chiếu", "ten_chu_the": "Hoang Thi Mo"},   # ascii vs unicode same person
-    ])
-    assert len(g_same_person_typo) == 1, g_same_person_typo
-
-    # Cùng họ + tên cuối chỉ khác 1-2 char (OCR typo) → KHÔNG split
-    g_typo = _group_consecutive([
-        {"doc_type": "CCCD", "ten_chu_the": "Nguyễn Văn A"},
-        {"doc_type": "CCCD", "ten_chu_the": "Nguyễn Văn"},        # OCR cắt cuối, vẫn cùng người
-    ])
-    assert len(g_typo) == 1, g_typo
-
-    # _names_clearly_differ direct test
-    assert _names_clearly_differ("Hoàng Thị Mơ", "Âu Thị Huyền") is True
-    assert _names_clearly_differ("Hoàng Văn Thành", "Phan Thị Bính") is True
-    assert _names_clearly_differ("Hoàng Thị Mơ", "Hoang Thi Mo") is False     # ascii vs unicode
-    assert _names_clearly_differ("Hoàng Thị Mơ", "") is False                 # empty → không khẳng định
-    assert _names_clearly_differ("Hoàng Văn Thành", "Hoàng Văn Thanh") is False  # 1 char diff cùng họ-đệm
-    print("_group_consecutive multi-person split OK")
     # _split_pdf_pages: tạo PDF 4 trang in-memory rồi tách 2-3 → còn 2 trang
     try:
         import pypdf, io as _io
@@ -1928,18 +1405,10 @@ def run_self_test() -> int:
         _seg = _split_pdf_pages(_tmp, 2, 3)
         assert _count_pdf_pages(_seg) == 2, _count_pdf_pages(_seg)
         _seg.unlink(missing_ok=True)
-        # rasterize 1 trang → bắt sớm vụ thiếu Pillow / pypdfium2 hỏng.
-        if _HAS_PIL:
-            _b64 = _rasterize_page_to_jpg_b64(_tmp, 0)
-            assert isinstance(_b64, str) and len(_b64) > 100, f"rasterize b64 quá ngắn: {len(_b64)}"
-            assert base64.b64decode(_b64)[:3] == b"\xff\xd8\xff", "rasterize không phải JPEG"
-            print("rasterize page → JPEG OK (Pillow available)")
-        else:
-            print("rasterize SKIP (Pillow chưa cài — multi-page split sẽ bị disable)")
         _tmp.unlink(missing_ok=True)
-        print("page-by-page helpers OK (pypdf + pypdfium2 available)")
+        print("page-by-page helpers OK (pypdf available)")
     except ImportError:
-        print("page-by-page helpers SKIP (pypdf/pypdfium2 chưa cài)")
+        print("page-by-page helpers SKIP (pypdf chưa cài)")
     # checklist module sanity
     try:
         from lib import checklist as _ck
@@ -1979,8 +1448,6 @@ def main(argv=None) -> int:
                     help="Bypass hash-dedup; OCR + classify lại mọi file (dùng cho /oldfile re-run sau khi update classifier).")
     ap.add_argument("--sweep-meta", action="store_true",
                     help="Trước khi xử lý batch, dọn mọi file .md/.json lạc trong 4 folder khách → _Bot OCR & Metadata.")
-    ap.add_argument("--no-docai", action="store_true",
-                    help="Bỏ qua Document AI flow; dùng Gemini page-classify như cũ (debug).")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -2046,49 +1513,40 @@ def main(argv=None) -> int:
             except Exception as e:  # noqa: BLE001
                 log(f"sweep_stray_sidecars failed (bỏ qua): {type(e).__name__}: {e}")
 
-        use_docai = bool(DOCAI_PROCESSOR_ID) and not args.dry_run and not getattr(args, "no_docai", False)
-        # OCR mọi file OCR-được ĐỒNG THỜI trước (Gemini call/file là độc lập); phần dưới (phân loại + upload + sidecar) vẫn tuần tự.
-        # Khi DocAI bật: PDF đi qua DocAI flow riêng → bỏ qua khỏi Gemini prefetch để tránh double OCR.
-        _ocr_files = [(p, n) for (p, n) in files
-                      if not (use_docai and p.suffix.lower() == ".pdf")] if use_docai else files
+        _EXISTING_DOCS_CACHE.clear()  # reset per-batch; planning phase đọc Drive 1 lần rồi cache
 
+        # DocAI OCR tất cả file (PDF + ảnh + .doc/.docx) song song; gpt-5-mini classify và plan sau.
+        ocr_cache = docai_prefetch(files, dry_run=args.dry_run, workers=OCR_WORKERS)
+
+        # Batch-plan PDF nhiều trang: DocAI OCR items → gpt-5-mini plan
+        _pdf_ocr_items = [
+            {"file_id": f"F{i}", "path": p, "src_name": n, "pages_text": ocr_cache[n]}
+            for i, (p, n) in enumerate(files, 1)
+            if n in ocr_cache and ocr_cache[n] and p.suffix.lower() == ".pdf"
+        ]
         docai_batch_plans: dict[str, dict] = {}
-        if use_docai:
-            _pdf_files = [(p, n) for (p, n) in files if p.suffix.lower() == ".pdf"]
-            # Chạy Gemini OCR ảnh/non-PDF và DocAI OCR PDF SONG SONG để tránh
-            # DeepSeek batch classify chặn start của DocAI.
-            import concurrent.futures as _cf
-            with _cf.ThreadPoolExecutor(max_workers=2) as _ex:
-                _fut_gemini = _ex.submit(ocr_prefetch, _ocr_files, dry_run=args.dry_run, workers=OCR_WORKERS) if _ocr_files else None
-                _fut_docai = _ex.submit(_docai_ocr_pdfs, _pdf_files) if _pdf_files else None
-                ocr_cache = _fut_gemini.result() if _fut_gemini else {}
-                _docai_ocr_items = _fut_docai.result() if _fut_docai else []
-            # Sau cả 2 OCR xong → DeepSeek classify ảnh + plan PDF
-            ds_cache = _deepseek_batch_classify(ocr_cache, applicant=applicant) if (CLASSIFY_MODEL and not args.dry_run and ocr_cache) else {}
-            if _docai_ocr_items and len(_docai_ocr_items) >= 2:
-                docai_batch_plans = _docai_batch_plan_pdfs(_docai_ocr_items, applicant, case_folder_id or "")
-        else:
-            ocr_cache = ocr_prefetch(_ocr_files, dry_run=args.dry_run, workers=OCR_WORKERS) if _ocr_files else {}
-            ds_cache = _deepseek_batch_classify(ocr_cache, applicant=applicant) if (CLASSIFY_MODEL and not args.dry_run and ocr_cache) else {}
+        if _pdf_ocr_items and len(_pdf_ocr_items) >= 2 and not args.dry_run:
+            docai_batch_plans = _docai_batch_plan_pdfs(_pdf_ocr_items, applicant, case_folder_id or "")
+
+        try:
+            from lib.rule_loader import load_doc_types as _ldt_main
+            _tag_map_main = {dt.tag: dt.folder for dt in _ldt_main()}
+        except Exception:  # noqa: BLE001
+            _tag_map_main = {}
 
         name_registry: dict = {}
         items = []
         for idx, (path, src_name) in enumerate(files, 1):
             log(f"[{idx}/{total}] {src_name}")
 
-            # === DocAI flow: PDF + DOCAI_PROCESSOR_ID có → 1 call DocAI OCR + DeepSeek plan ===
-            if use_docai and path.suffix.lower() == ".pdf":
+            # === DocAI flow: PDF → plan via gpt-5-mini ===
+            if path.suffix.lower() == ".pdf":
                 plan = docai_batch_plans.get(src_name)
                 if plan:
                     log(f"     DocAI batch-plan hit: {len(plan.get('documents', []))} document(s)")
                 else:
                     plan = _docai_plan_pdf(path, applicant, case_folder_id or "")
                 if plan is not None:
-                    try:
-                        from lib.rule_loader import load_doc_types as _ldt_main
-                        _tag_map_main = {dt.tag: dt.folder for dt in _ldt_main()}
-                    except Exception:  # noqa: BLE001
-                        _tag_map_main = {}
                     plan_docs = _validate_plan(
                         plan.get("documents", []),
                         len(plan.get("_pages_text", [])) or _count_pdf_pages(path),
@@ -2107,61 +1565,14 @@ def main(argv=None) -> int:
                         items.extend(plan_items)
                         continue
                     else:
-                        log("     DocAI plan: 0 doc hợp lệ sau validate — fallback Gemini flow")
-                # plan is None hoặc validate ra rỗng → fallback sang flow cũ bên dưới
+                        log("     DocAI plan: 0 doc hợp lệ sau validate — single-doc fallback")
+                # plan is None hoặc validate ra rỗng → fallback sang single-doc
 
-            # === Gemini flow (cũ): page-classify Pass 1 → segments hoặc single-doc ===
-            segments: list[dict] = []
-            if (not args.dry_run) and path.suffix.lower() == ".pdf":
-                try:
-                    segments = detect_pdf_segments(path)
-                except Exception as e:  # noqa: BLE001
-                    log(f"     detect_pdf_segments lỗi: {type(e).__name__}: {e} — single-doc fallback")
-            if segments:
-                log(f"     multi-doc PDF: {len(segments)} segment → split + OCR per segment")
-                stem = Path(src_name).stem
-                ext_orig = Path(src_name).suffix or ".pdf"
-                for seg in segments:
-                    a, b = seg["tu_trang"], seg["den_trang"]
-                    seg_src = f"{stem}__split_{a}-{b}{ext_orig}"
-                    try:
-                        seg_path = _split_pdf_pages(path, a, b)
-                    except Exception as e:  # noqa: BLE001
-                        log(f"     split p{a}-{b} lỗi: {type(e).__name__}: {e} — bỏ qua segment")
-                        items.append({
-                            "src_name": seg_src, "split_from": src_name, "split_pages": f"{a}-{b}",
-                            "new_name": "", "ext": ext_orig, "tag": "", "folder": "",
-                            "subject": "", "relation": None, "status": "failed",
-                            "error": f"PDF split lỗi: {type(e).__name__}: {e}",
-                            "drive_link": "", "case_id": case_id,
-                        })
-                        continue
-                    try:
-                        seg_it = process_one(seg_path, seg_src,
-                                             case_folder_id=case_folder_id or "", applicant=applicant,
-                                             case_id=case_id, retries=args.retries, dry_run=args.dry_run,
-                                             sop=sop, name_registry=name_registry, prefetched_gem=None,
-                                             force_rescan=args.force_rescan)
-                    finally:
-                        try:
-                            seg_path.unlink(missing_ok=True)
-                        except Exception:  # noqa: BLE001
-                            pass
-                    # đánh dấu thuộc segment + parent file
-                    seg_it["split_from"] = src_name
-                    seg_it["split_pages"] = f"{a}-{b}"
-                    seg_it["pass1_doc_type"] = seg.get("doc_type", "")
-                    seg_it["pass1_ten_chu_the"] = seg.get("ten_chu_the", "")
-                    if seg_it.get("status") == "uploaded":
-                        seg_it["status"] = "uploaded-split"
-                    log(f"       seg p{a}-{b} -> {seg_it.get('status','?')}  {seg_it.get('new_name','')}")
-                    items.append(seg_it)
-                continue
             # Single-doc path (default)
             it = process_one(path, src_name, case_folder_id=case_folder_id or "", applicant=applicant,
                              case_id=case_id, retries=args.retries, dry_run=args.dry_run, sop=sop,
-                             name_registry=name_registry, prefetched_gem=ocr_cache.get(src_name),
-                             force_rescan=args.force_rescan, ds_hint=ds_cache.get(src_name))
+                             name_registry=name_registry, pages_text=ocr_cache.get(src_name),
+                             force_rescan=args.force_rescan)
             status = it.get("status", "?")
             log(f"     -> {status}  {it.get('new_name', '')}")
             items.append(it)

@@ -1,5 +1,8 @@
 """Document AI OCR wrapper — trả list[{"page": N, "text": "..."}] per-page.
 
+Hỗ trợ: PDF, JPEG, PNG, TIFF, BMP, WebP, GIF (native DocAI).
+         DOC/DOCX: convert sang PDF trước qua LibreOffice headless.
+
 Env vars (load từ scan-ocr.env trước khi gọi):
   GOOGLE_APPLICATION_CREDENTIALS — service account JSON path
   GOOGLE_DOCUMENTAI_PROJECT_ID   — vd "ally-visa-bot"
@@ -9,17 +12,57 @@ Env vars (load từ scan-ocr.env trước khi gọi):
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 
-DOCAI_PAGE_LIMIT = 15  # Document AI non-imageless mode: 15 trang/call (imageless = 30)
+DOCAI_PAGE_LIMIT = 15  # Document AI non-imageless mode: 15 trang/call
+
+MIME_MAP: dict[str, str] = {
+    ".pdf":  "application/pdf",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".tiff": "image/tiff",
+    ".tif":  "image/tiff",
+    ".bmp":  "image/bmp",
+    ".webp": "image/webp",
+    ".gif":  "image/gif",
+}
+
+OFFICE_EXTS = {".doc", ".docx"}
 
 
-def _ocr_chunk(raw_bytes: bytes, page_offset: int,
+def convert_to_pdf(path: Path, workdir: Path) -> Path:
+    """Convert .doc/.docx → PDF via LibreOffice headless. Trả path PDF tạm.
+
+    Raises RuntimeError nếu LibreOffice chưa cài hoặc conversion thất bại.
+    """
+    if not shutil.which("libreoffice"):
+        raise RuntimeError(
+            "libreoffice chưa cài. Chạy: sudo apt-get install -y libreoffice-writer --no-install-recommends"
+        )
+    result = subprocess.run(
+        ["libreoffice", "--headless", "--convert-to", "pdf",
+         "--outdir", str(workdir), str(path)],
+        check=True, timeout=60, capture_output=True,
+    )
+    pdf_path = workdir / (path.stem + ".pdf")
+    if not pdf_path.exists():
+        raise RuntimeError(
+            f"LibreOffice chạy xong nhưng không thấy output PDF: {pdf_path}\n"
+            f"stderr: {result.stderr.decode()[:500]}"
+        )
+    return pdf_path
+
+
+def _ocr_chunk(raw_bytes: bytes, page_offset: int, mime_type: str,
                client, processor_name: str, documentai) -> list[dict]:
-    """OCR 1 chunk PDF (≤15 trang), trả list[{"page": N, "text": "..."}] với page 1-based tuyệt đối."""
+    """OCR 1 chunk (PDF ≤15 trang hoặc 1 image), trả list[{"page": N, "text": "..."}]."""
     from google.cloud import documentai as _dai  # noqa: PLC0415
-    raw_doc = _dai.RawDocument(content=raw_bytes, mime_type="application/pdf")
+    raw_doc = _dai.RawDocument(content=raw_bytes, mime_type=mime_type)
     request = _dai.ProcessRequest(name=processor_name, raw_document=raw_doc)
     result = client.process_document(request=request)
     doc = result.document
@@ -27,13 +70,11 @@ def _ocr_chunk(raw_bytes: bytes, page_offset: int,
     pages_out: list[dict] = []
     for page in doc.pages:
         page_no = page.page_number + page_offset  # 1-based tuyệt đối
-        # Dùng page-level text anchor (SDK-version agnostic, không phụ thuộc block.paragraphs)
         page_segs = page.layout.text_anchor.text_segments if page.layout else []
         page_text = "".join(
             full_text[int(s.start_index):int(s.end_index)] for s in page_segs
         ).strip()
         if not page_text:
-            # Fallback: ghép từ tokens nếu có
             token_parts: list[str] = []
             for token in page.tokens:
                 for seg in token.layout.text_anchor.text_segments:
@@ -43,10 +84,13 @@ def _ocr_chunk(raw_bytes: bytes, page_offset: int,
     return pages_out
 
 
-def ocr_pdf_with_docai(path: Path) -> list[dict]:
-    """Gọi Document AI OCR 1 PDF → list[{"page": N, "text": "..."}] (1-based page).
+def ocr_with_docai(path: Path, workdir: Path | None = None) -> list[dict]:
+    """OCR bất kỳ file (PDF, ảnh, hoặc Office doc) → list[{"page": N, "text": "..."}].
 
-    PDF > 30 trang tự động split thành chunk ≤30 trang, OCR từng chunk rồi gộp.
+    - PDF/ảnh: gửi thẳng lên DocAI với MIME type tương ứng.
+    - DOC/DOCX: convert sang PDF qua LibreOffice, rồi OCR như PDF.
+    - PDF > 15 trang: tự split thành chunk ≤15, OCR từng chunk rồi gộp.
+    - Image: luôn trả đúng 1 page với page=1.
     Trả [] nếu lỗi cấu hình / API error (caller kiểm tra len()==0).
     """
     project_id   = os.environ.get("GOOGLE_DOCUMENTAI_PROJECT_ID", "")
@@ -64,34 +108,58 @@ def ocr_pdf_with_docai(path: Path) -> list[dict]:
     client = documentai.DocumentProcessorServiceClient(client_options=opts)
     processor_name = client.processor_path(project_id, location, processor_id)
 
-    # Đếm trang để biết có cần split không
+    suffix = path.suffix.lower()
+    tmp_pdf: Path | None = None
+
     try:
-        import pypdf as _pypdf
-        reader = _pypdf.PdfReader(str(path))
-        n_total = len(reader.pages)
-    except Exception:  # noqa: BLE001
-        n_total = 0
+        # DOC/DOCX → convert to PDF first
+        if suffix in OFFICE_EXTS:
+            _workdir = workdir or Path(tempfile.mkdtemp())
+            tmp_pdf = convert_to_pdf(path, _workdir)
+            path = tmp_pdf
+            suffix = ".pdf"
 
-    if n_total <= DOCAI_PAGE_LIMIT:
-        # Gửi nguyên file
-        return _ocr_chunk(path.read_bytes(), 0, client, processor_name, documentai)
+        mime_type = MIME_MAP.get(suffix, "application/pdf")
 
-    # PDF dài → split thành chunk ≤30 trang, OCR từng chunk
-    import io
-    import pypdf as _pypdf2
-    reader2 = _pypdf2.PdfReader(str(path))
-    pages_out: list[dict] = []
-    chunk_start = 0  # 0-based
-    while chunk_start < n_total:
-        chunk_end = min(chunk_start + DOCAI_PAGE_LIMIT, n_total)  # exclusive
-        writer = _pypdf2.PdfWriter()
-        for i in range(chunk_start, chunk_end):
-            writer.add_page(reader2.pages[i])
-        buf = io.BytesIO()
-        writer.write(buf)
-        chunk_bytes = buf.getvalue()
-        chunk_pages = _ocr_chunk(chunk_bytes, chunk_start, client, processor_name, documentai)
-        pages_out.extend(chunk_pages)
-        chunk_start = chunk_end
+        # Images: single-page, send as-is
+        if mime_type.startswith("image/"):
+            return _ocr_chunk(path.read_bytes(), 0, mime_type, client, processor_name, documentai)
 
-    return pages_out
+        # PDF: may need chunking
+        try:
+            import pypdf as _pypdf
+            reader = _pypdf.PdfReader(str(path))
+            n_total = len(reader.pages)
+        except Exception:  # noqa: BLE001
+            n_total = 0
+
+        if n_total <= DOCAI_PAGE_LIMIT:
+            return _ocr_chunk(path.read_bytes(), 0, mime_type, client, processor_name, documentai)
+
+        # Long PDF → split into chunks
+        import io
+        import pypdf as _pypdf2
+        reader2 = _pypdf2.PdfReader(str(path))
+        pages_out: list[dict] = []
+        chunk_start = 0
+        while chunk_start < n_total:
+            chunk_end = min(chunk_start + DOCAI_PAGE_LIMIT, n_total)
+            writer = _pypdf2.PdfWriter()
+            for i in range(chunk_start, chunk_end):
+                writer.add_page(reader2.pages[i])
+            buf = io.BytesIO()
+            writer.write(buf)
+            chunk_pages = _ocr_chunk(buf.getvalue(), chunk_start, mime_type,
+                                     client, processor_name, documentai)
+            pages_out.extend(chunk_pages)
+            chunk_start = chunk_end
+        return pages_out
+
+    finally:
+        # Clean up temp PDF from DOCX conversion
+        if tmp_pdf and tmp_pdf.exists():
+            tmp_pdf.unlink()
+
+
+# Back-compat alias used by old code paths
+ocr_pdf_with_docai = ocr_with_docai

@@ -1,11 +1,9 @@
 # Dep cho scan-ho-so app (telegram_listener.py + scan_pipeline.py + lib/*).
 # Cài: pip3 install --user --break-system-packages -r requirements.txt
-# Phiên bản pin theo môi trường prod hiện tại (CT102 claude-dev, 2026-05-15).
-# Pillow là BẮT BUỘC từ 2026-05-15 — multi-page PDF split rasterize page → JPEG.
+# Phiên bản pin theo môi trường prod hiện tại (CT102 claude-dev, 2026-05-16).
+# Pillow + pypdfium2 đã xoá: multi-page PDF rasterize không còn dùng (DocAI OCR native).
 
-Pillow==12.2.0
 pypdf==6.11.0
-pypdfium2==5.8.0
 python-telegram-bot==22.7
 google-api-python-client==2.196.0
 google-auth==2.52.0
