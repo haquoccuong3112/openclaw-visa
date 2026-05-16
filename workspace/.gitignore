@@ -13,6 +13,7 @@ memory/
 # bot-generated / churny
 scan-ho-so/runs/
 scan-ho-so/test-runs/
+scan-ho-so/tests/test-data/
 scan-ho-so/_checkpoints/
 scan-ho-so/group_registry.json
 scan-ho-so/group_registry.json.bak

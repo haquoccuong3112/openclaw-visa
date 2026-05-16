@@ -234,7 +234,7 @@ def build_dataset(case_folder_id: str, drive_id: str | None = None) -> list[dict
             "folder": d.get("folder", ""),
             "nguoi": d.get("subject", ""),
             "quan_he": d.get("relation", ""),  # quan hệ với đương đơn: "me","ba","con","vo","chong",""
-            "tom_tat": d.get("summary", ""),
+            "tom_tat": d.get("md_content") or d.get("summary", ""),   # md_content richer when available
             "du_lieu": d.get("extracted") if isinstance(d.get("extracted"), dict) else {},
             "key_fields": gem.get("key_fields") if isinstance(gem.get("key_fields"), dict) else {},
             "confidence": d.get("confidence", ""),
@@ -724,9 +724,11 @@ async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": temperature,
         "stream": True,
     }
+    # gpt-5-* only accepts default temperature (1); skip for those models
+    if not direct_model.startswith("gpt-5"):
+        payload["temperature"] = temperature
     buf: list[str] = []
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream(
@@ -803,8 +805,10 @@ def _call_openrouter(model: str, system: str, user: str, timeout: int = 300,
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": temperature,
     }
+    # gpt-5-* only accepts default temperature (1); skip for those models
+    if not direct_model.startswith("gpt-5"):
+        payload["temperature"] = temperature
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     with httpx.Client(timeout=timeout) as client:
@@ -1376,6 +1380,120 @@ def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
             "coverage": coverage, "report_link": report_link, "doc_link": report_link,
             "md_link": report_link, "sheet_link": "", "report": report_text, "report_text": report_text,
             "profile": profile_out, "error": None}
+
+
+def run_from_md_contents(
+    md_contents: list[str],
+    case_folder_id: str,
+    applicant: str,
+    today: str,
+    dataset: list[dict],
+    drive_id: str | None = None,
+    vision_compare: list | None = None,
+) -> dict:
+    """Fresh run: dùng md_content in-memory từ per-doc classify → tầng 2 thẩm định.
+
+    Bỏ qua tầng 1 extract_profile_data (md_content đã là nội dung trích xuất).
+    Dùng cho batch Telegram / /oldfile. /check dùng run_and_write() (đọc Drive sidecars).
+    """
+    try:
+        from .sop_naming import title_case_ascii
+    except Exception:
+        def title_case_ascii(s):
+            return (s or "").strip() or "Unknown"
+    today = today or time.strftime("%d/%m/%Y")
+    coverage = compute_coverage(dataset)
+    n_docs = len(md_contents)
+    if not md_contents:
+        return {"ran": False, "error": "không có md_content nào", "coverage": coverage}
+
+    # Vision compare — caller thường đã pass kết quả; fallback download từ Drive nếu cần.
+    if not vision_compare:
+        try:
+            try:
+                from .vision_check import compare_pairs_for_case
+            except ImportError:
+                from vision_check import compare_pairs_for_case  # type: ignore  # noqa
+            vision_compare = compare_pairs_for_case(case_folder_id, dataset, drive_id=drive_id)
+            if vision_compare:
+                print(f"checklist: vision_compare case-level ({len(vision_compare)} pairs)", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"checklist: vision_compare case-level lỗi: {type(e).__name__}: {e}", flush=True)
+
+    vc_block = ""
+    if vision_compare:
+        lines = ["## Kết quả so sánh ảnh (vision compare):"]
+        for vc in vision_compare:
+            r = vc.get("result") or {}
+            lines.append(
+                f"- {vc.get('file_a','?')} × {vc.get('file_b','?')}: "
+                f"same_person={r.get('same_person')} confidence={r.get('confidence')} "
+                f"phau_thuat={r.get('phau_thuat_signs')}"
+            )
+        vc_block = "\n".join(lines) + "\n\n"
+
+    # Deterministic pre-checks (rule_engine — chạy TRƯỚC LLM).
+    det_errors: list[dict] = []
+    try:
+        try:
+            from .rule_loader import load_validations
+            from .rule_engine import detect_deterministic_errors
+        except ImportError:
+            from rule_loader import load_validations  # type: ignore  # noqa
+            from rule_engine import detect_deterministic_errors  # type: ignore  # noqa
+        det_errors = detect_deterministic_errors(list(load_validations()), dataset)
+        if det_errors:
+            print(f"run_from_md_contents: deterministic {len(det_errors)} lỗi "
+                  f"({', '.join(e['code'] for e in det_errors)})", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"run_from_md_contents: rule_engine lỗi: {type(e).__name__}: {e}", flush=True)
+
+    system = _build_prompt(today, applicant, coverage, deterministic_errors=det_errors)
+    content_block = "\n\n---\n\n".join(
+        f"### Giấy tờ {i + 1}\n{mc}" for i, mc in enumerate(md_contents) if mc.strip()
+    )
+    user = (
+        f"KHÁCH HÀNG: {applicant or '(không rõ tên)'}\n"
+        f"Ngày kiểm tra: {today}\n"
+        f"Số giấy tờ trong hồ sơ: {n_docs}\n\n"
+        f"{vc_block}"
+        f"NỘI DUNG HỒ SƠ (mỗi giấy tờ 1 block markdown — trích xuất từ OCR + vision):\n\n"
+        f"{content_block}"
+    )
+
+    model = CHECKLIST_MODEL
+    candidates = [model] + ([CHECKLIST_FALLBACK_MODEL] if model != CHECKLIST_FALLBACK_MODEL else [])
+    report_text = None
+    model_used = None
+    last_err = None
+    for attempt, mdl in enumerate(candidates, 1):
+        try:
+            text = _call_openrouter(mdl, system, user)
+            if text.strip():
+                report_text = text.strip()
+                model_used = mdl
+                break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            print(f"run_from_md_contents: attempt {attempt} model={mdl} failed: {type(e).__name__}: {e}", flush=True)
+
+    if not report_text:
+        return {"ran": False,
+                "error": f"{type(last_err).__name__}: {last_err}" if last_err else "LLM trả về rỗng",
+                "coverage": coverage, "model": model_used}
+
+    doc_name = f"Bao cao tham dinh - {title_case_ascii(applicant) or 'Unknown'}"
+    full_md = render_doc_md(report_text, applicant, today, model_used, coverage, dataset)
+    report_link = ""
+    try:
+        report_link = _write_google_doc(case_folder_id, doc_name, full_md, drive_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"run_from_md_contents: ghi Google Doc thất bại: {type(e).__name__}: {e}", flush=True)
+
+    return {"ran": True, "model": model_used, "extract_model": None, "n_docs": n_docs,
+            "coverage": coverage, "report_link": report_link, "doc_link": report_link,
+            "md_link": report_link, "sheet_link": "", "report": report_text, "report_text": report_text,
+            "profile": None, "error": None}
 
 
 # ===========================================================================
