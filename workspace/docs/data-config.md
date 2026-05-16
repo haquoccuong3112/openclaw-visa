@@ -256,6 +256,88 @@ An Giang, Bắc Ninh, Cà Mau, Cao Bằng, Đắk Lắk, Điện Biên, Đồng 
 
 ---
 
+## Quy tắc đặt tên file (SOP Naming)
+
+Nguồn: `visa_canada_sop_raw.md` mục 10. Thực thi bởi `lib/sop_naming.py`.
+
+### Format chuẩn
+
+```
+[Loại giấy tờ]-[Tên chủ thể].[ext]
+```
+
+Ví dụ:
+- `CCCD-Bui Van Huan.pdf`
+- `LLTP-Bui Van Huan.pdf`
+- `GKS-Bui Van Huan.pdf`
+- `Sao ke-Bui Van Huan.pdf`
+
+### Nhiều file cùng loại
+
+Thêm số thứ tự vào sau tên loại, trước dấu `-`:
+
+- `Sao ke 1-Bui Van Huan.pdf`
+- `Sao ke 2-Bui Van Huan.pdf`
+- `So dat 1-Bui Van Huan.pdf`
+- `So dat 2-Bui Van Huan.pdf`
+
+### Chuẩn hóa tên
+
+Bắt buộc:
+- Không dùng dấu tiếng Việt
+- Không ký tự đặc biệt
+- Không khoảng trắng thừa
+- Viết hoa chữ cái đầu mỗi từ (title case)
+- Không dùng tên chung chung: `scan001`, `image123`, `zalo file`, `final final`, `document new`, `file moi`
+
+Tên file phải thể hiện: loại giấy tờ + chủ giấy tờ (+ quan hệ nếu người thân) (+ `_ENG` nếu bản tiếng Anh).
+
+### Hậu tố `_ENG`
+
+Thêm `_ENG` vào sau tên loại khi file là bản tiếng Anh, song ngữ, hoặc bản dịch:
+
+- `Bang cap_ENG-Nguyen Van A.pdf`
+- `LLTP_ENG-Nguyen Van A.pdf`
+
+### File người thân
+
+Format: `[Tag] [relation]-[Tên chủ thể].[ext]`
+
+Relation slug chèn vào giữa tag và tên (xem bảng relations.yaml bên trên):
+
+| Quan hệ | Slug | Ví dụ |
+|---------|------|-------|
+| Bố / cha | `ba` | `CCCD ba-Bui Van Huan.pdf` |
+| Mẹ | `me` | `CCCD me-Bui Van Huan.pdf` |
+| Vợ | `vo` | `GKS vo-Bui Van Huan.pdf` |
+| Chồng | `chong` | `GKS chong-Nguyen Thi A.pdf` |
+| Con | `con` | `GKS con-Bui Van Huan.pdf` |
+| Ông/bà | `ong ba` | `So dat ong ba-Bui Van Huan.pdf` |
+| Anh/chị/em ruột | `anh chi em` | `CCCD anh chi em-Bui Van Huan.pdf` |
+| Cô/dì/chú/bác | `co di chu bac` | `CCCD co di chu bac-Bui Van Huan.pdf` |
+
+### Không suy đoán
+
+Nếu không đủ dữ liệu để xác định chủ giấy tờ, quan hệ, hoặc bản ENG → **không tự suy đoán**. Đặt `needs_review = true` và đánh dấu để nhân viên kiểm tra.
+
+### Bảng viết tắt
+
+| Viết tắt | Tên đầy đủ |
+|----------|-----------|
+| CCCD | Căn cước công dân |
+| GPLX | Giấy phép lái xe |
+| GKS | Giấy khai sinh |
+| LLTP | Lý lịch tư pháp |
+| XNCT | Xác nhận cư trú |
+| STK | Sổ tiết kiệm |
+| BHYT | Bảo hiểm y tế |
+| BHXHTN | Bảo hiểm xã hội tự nguyện |
+| HDLD | Hợp đồng lao động |
+| SYLL | Sơ yếu lý lịch |
+| KN HTX | Kinh nghiệm hợp tác xã |
+
+---
+
 ## Liên quan
 
 - Schema validation: `lib/rule_loader.py` — fail-fast khi YAML malformed
