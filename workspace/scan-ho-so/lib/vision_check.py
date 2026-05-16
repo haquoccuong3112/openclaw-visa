@@ -56,7 +56,7 @@ def _pdf_to_jpeg(pdf_bytes: bytes) -> bytes | None:
         if len(doc) == 0:
             return None
         page = doc[0]
-        bitmap = page.render(scale=150 / 72)  # 150 DPI
+        bitmap = page.render(scale=300 / 72)  # 150 DPI
         pil_image = bitmap.to_pil()
         buf = io.BytesIO()
         pil_image.save(buf, format="JPEG", quality=85)
@@ -85,7 +85,7 @@ def _pdf_find_face_page(pdf_bytes: bytes, client, max_pages: int = 5) -> bytes |
         first_page_jpeg: bytes | None = None
         for i in range(n):
             page = doc[i]
-            bitmap = page.render(scale=150 / 72)  # 150 DPI
+            bitmap = page.render(scale=300 / 72)  # 150 DPI
             pil_img = bitmap.to_pil()
             buf = io.BytesIO()
             pil_img.save(buf, format="JPEG", quality=85)
