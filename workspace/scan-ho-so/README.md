@@ -16,20 +16,20 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
   prefix (`DH Pro` / `DongHanh` / `Đồng Hành Pro` / `Đồng Hành`), em-dash / en-dash, token `KH` trên nhánh
   khách; chương trình gồm `WP\d+[mMyY]?` + `HighSkilled` + `FARM` + các code visa truyền thống. Self-test:
   `python3 telegram_listener.py --self-test`.
-- **`scan_pipeline.py`** — the unzip → Gemini-OCR → classify → SOP-rename → upload-to-Drive → AI-thẩm-định
-  pipeline. Gemini-OCR runs **in parallel** across files (`SCAN_OCR_WORKERS` threads, default 5); classify /
-  rename / Drive-upload / thẩm-định stay sequential. Default OCR model `gemini-2.5-flash` (env `GEMINI_MODEL`)
-  với `response_format: json_schema` (strict); 3-tier fallback `json_schema → json_object → off` cho model
-  chưa hỗ trợ. **Multi-page PDF nhiều loại giấy tờ** đi qua flow 2-pass: Pass 1 — rasterize từng trang
-  (`pypdfium2`) → `gemini-2.5-flash` quick-classify per page (env `PAGE_CLASSIFY_MODEL`); group trang
-  liên tiếp cùng loại → segment. Pass 2 — split PDF (`pypdf`) + OCR đầy đủ per segment, mỗi segment thành
-  1 file riêng (status `uploaded-split`). File `confidence=low + tag=Khac` → escalate `gemini-2.5-pro` 1 call
-  để cứu. File đã có hash SHA-1 trong sidecar → status `duplicate-by-hash` (skip upload, KH gửi lại không
-  tạo trùng). Relation tag (bo/me/vo/chong/con…) tự đính vào filename: `CCCD bo-Nguyen Van A.pdf`.
-  Manifest covers every input file; per-file retries; idempotent re-runs. Run by the bot
-  (subprocess) and by the OpenClaw agent via the `../skills/scan-ho-so-pipeline/` skill (which is *just*
-  `SKILL.md` — the procedure docs; the code is here). CLI: `python3 scan_pipeline.py <zip|dir>
-  --from-registry <chat-id> --manifest <path>` (or `--case-folder-id … --applicant …`); `--dry-run`,
+- **`scan_pipeline.py`** — the unzip → OCR → classify → SOP-rename → upload-to-Drive → AI-thẩm-định
+  pipeline. Runs **two parallel prefetch phases** before sequential Drive upload:
+  **Phase 1** — DocAI OCR all files in parallel (`SCAN_OCR_WORKERS` threads, default 5) →
+  `[{page, text}]` per file. **Phase 2** — GPT vision classify all files in parallel (same thread count)
+  — first-page image (rasterized via `pypdfium2` at 150 DPI) + DocAI text → `gpt-5-mini`
+  (env `OCR_CLASSIFY_MODEL`) → strict JSON with `tag`, `folder`, `subject`, `relation`, `confidence`,
+  `person[]`, `summary_vi`, `md_content`. The `md_content` field is a full markdown of the document —
+  used as `.md` sidecar body AND passed directly to the checklist (no Drive round-trip).
+  **Phase 3** (sequential) — `classify_doc_type()` + `build_filename()` + SHA-1 dedup → Drive upload →
+  `.json` + `.md` sidecars in `_Bot OCR & Metadata/`. **Multi-doc PDF splitting is not supported** —
+  each file is one document. Relation tag tự đính vào filename: `CCCD bo-Nguyen Van A.pdf`.
+  File đã có hash SHA-1 → `duplicate-by-hash` (skip upload). Manifest covers every input;
+  per-file retries; idempotent re-runs. CLI: `python3 scan_pipeline.py <zip|dir>
+  --from-registry <chat-id>` (hoặc `--case-folder-id … --applicant …`); `--dry-run`,
   `--checklist-only`, `--no-checklist`, `--self-test`, `--retries N`.
 - **`lib/`** — shared building blocks (used by both `telegram_listener.py` and `scan_pipeline.py`):
   - `rule_loader.py` ⭐ — load + validate `data/rules.yaml` / `data/doc_types.yaml` / `data/relations.yaml`
@@ -47,10 +47,12 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
     làm ground-truth cho LLM tầng 2 (pattern giống `_dia_gioi`).
   - `sop_naming.py` — doc-type classification + the SOP filename builder (`<Tag>[ relation][ idx]-<Subject>[_ENG].ext`).
     `DOC_TYPE_PATTERNS` + `FILENAME_HINTS` + `RELATION_MAP` giờ derive từ `data/*.yaml` lúc module-import.
-  - `checklist.py` — the AI thẩm định: 2-stage LLM pipeline (cheap extract → reasoning) → a 4-part Markdown
-    report written as a Google Doc, + the deterministic "điểm danh" FARM coverage (26 items / 18 required).
-    Tầng 2: chạy `rule_engine` pre-check trước → đưa "LỖI BOT ĐÃ PHÁT HIỆN" vào prompt → LLM chỉ làm
-    cross-validation + viết báo cáo (giảm false-negative 30-50%).
+  - `checklist.py` — the AI thẩm định. **`run_from_md_contents()`**: used by fresh pipeline runs —
+    nhận in-memory `md_content` strings từ GPT vision classify, bỏ qua stage-1 extract, gọi thẳng
+    stage-2 reasoning LLM → 4-part Markdown report. **`run_and_write()`**: used by `/check` re-runs —
+    đọc `.json`/`.md` sidecars từ Drive, chạy đủ 2 stage (stage 1: cheap extract → JSON; stage 2: reasoning).
+    Cả hai: `rule_engine` pre-check trước → "LỖI BOT ĐÃ PHÁT HIỆN" vào prompt; write Google Doc;
+    deterministic "điểm danh" FARM coverage (26 items / 18 required).
   - `chat.py` — the Q&A "visa officer": `answer_question()` with one-shot mechanisms `NEED_FILE` / `NEED_ADDR`
     (tra `diadia.py`) / `NEED_WEB` / `NEED_RENAME`; the case context also carries a `_dia_gioi` block (đã tra
     sẵn địa giới mọi địa chỉ trong hồ sơ → LLM coi là ground-truth, không gọi tên cũ↔mới của cùng nơi là "mâu
