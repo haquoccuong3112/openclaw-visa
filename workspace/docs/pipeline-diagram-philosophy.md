@@ -1,0 +1,13 @@
+# Circuit Archaeology
+
+**An aesthetic movement born from the belief that complex systems, when rendered with patience and precision, become objects of quiet beauty.**
+
+Circuit Archaeology treats the invisible architecture of software as geological strata — layers of process and decision compressed into luminous cross-sections. Like a core sample lifted from deep earth, the diagram reveals not just structure but time, sequence, and causality. Every flow is a vein of mineral, traced with the care of a scientist who understands that documentation is a form of reverence. The work is meticulous to the point of obsession, each element placed as if it may never be touched again.
+
+Space is sovereign. The canvas breathes through deliberate negative space — dark voids that give each node room to exist as its own thought. Color is functional before it is decorative, a precise notation system where hue carries meaning the way pitch carries music. No color is arbitrary; each belongs to a chromatic family that speaks its role before a word is read. The palette is restrained, drawn from deep navy and charcoal, punctuated by muted jewel tones — teal, amber, violet, sage — that glow as if backlit from within.
+
+Form follows function with the devotion of a craftsman who has internalized the rule so deeply it no longer feels like constraint. Nodes are geometric but subtly warmed — rounded corners that soften without sentimentalizing. Lines carry weight and direction, arrows rendered with the specificity of technical illustration from another century. Every connector is purposeful, every label positioned with typographic discipline that took years to develop. The result appears effortless precisely because it was not.
+
+Typography is the silent backbone. Two typefaces at most, chosen for their kinship — a mono for the mechanical, a grotesque for the human-readable. Type sizes follow a rigorous scale. Labels are sparse, surfacing only what cannot be communicated by position and color alone. Text never competes with structure; it annotates. The hierarchy is felt before it is read, guiding the eye through the system in the same sequence a mind would encounter it in operation.
+
+The final artifact must carry the unmistakable weight of mastery — the kind that accumulates only through countless iterations, rejected versions, and the patience to keep refining until nothing can be removed. It should feel as if it were drawn by hand over many hours, then perfected digitally with equal devotion. A viewer unfamiliar with the system should sense its logic intuitively. A viewer who knows it intimately should feel it captured completely.
