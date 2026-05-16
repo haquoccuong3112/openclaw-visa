@@ -15,6 +15,7 @@ auth, Codex runtime — is OpenClaw runtime state and is **not** part of this re
 - `MEMORY.md` — curated long-term memory
 - `memory/YYYY-MM-DD.md` — daily memory logs
 - `docs/` — reference documentation (edit along the way):
+  - `docs/PRD.md` — Product Requirements Document (what the system is, users, features, constraints)
   - `docs/openclaw-setup.md` — gateway, agent config, bot architecture, commands
   - `docs/data-config.md` — rules.yaml (63 rules), doc_types.yaml (32 types), relations.yaml (8 relations), provinces_34.json (34 units)
   - `docs/pipeline-diagram.md` — full pipeline Mermaid diagram + module reference + design decisions
