@@ -19,6 +19,7 @@ auth, Codex runtime — is OpenClaw runtime state and is **not** part of this re
   - `docs/openclaw-setup.md` — gateway, agent config, bot architecture, commands
   - `docs/data-config.md` — rules.yaml (63 rules), doc_types.yaml (32 types), relations.yaml (8 relations), provinces_34.json (34 units)
   - `docs/pipeline-diagram.md` — full pipeline Mermaid diagram + module reference + design decisions
+  - `docs/scan-pipeline.md` — scan_pipeline.py deep reference: steps, functions, libraries, manifest, dedup, retry
   - `docs/plan-openclaw-qa-migration.md` — plan: migrate Q&A layer to OpenClaw (Option B)
 - `skills/` — OpenClaw skills: stock ClawHub skills + the custom `scan-ho-so-pipeline`
 - `scan-ho-so/` — the `@donghanhprocessingbot` Telegram bot (systemd unit `donghanhbot.service`);
