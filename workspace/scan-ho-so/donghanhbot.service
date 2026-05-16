@@ -10,6 +10,8 @@ WorkingDirectory=/home/cuong/.openclaw/workspace/scan-ho-so
 ExecStart=/usr/bin/python3 /home/cuong/.openclaw/workspace/scan-ho-so/telegram_listener.py
 Restart=on-failure
 RestartSec=10
+KillMode=process
+TimeoutStopSec=300
 StandardOutput=journal
 StandardError=journal
 

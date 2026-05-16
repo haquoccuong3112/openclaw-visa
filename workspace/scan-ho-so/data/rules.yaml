@@ -557,7 +557,7 @@ validations:
     applies_to: [The Visa-MC]
     rule: "Thẻ ngân hàng CẤM dùng: Ever-link Vietcombank, mọi loại Agribank, MB Hybrid. CHỈ dùng: Techcombank, MB Bank."
     action: "Yêu cầu khách đổi thẻ ngay"
-    condition: "any_in_text(doc.summary, ['ever-link', 'everlink', 'agribank', 'mb hybrid'])"
+    condition: "any_in_text(doc.summary, ['ever-link', 'everlink', 'agribank', 'mb hybrid', 'vietcombank'])"
     needs_llm: false
 
   - code: "12.2"
@@ -783,6 +783,33 @@ validations:
     needs_llm: false
 
   # === BHXH / BHYT ===
+  - code: "20.1"
+    category: cong_viec
+    severity: warn
+    applies_to: [BHXH, BHYT]
+    rule: "Tên trên biên lai BHXH/BHYT khớp 100% với CCCD/hộ chiếu đương đơn"
+    action: "Báo nếu tên lệch"
+    condition: null
+    needs_llm: true
+
+  - code: "20.2"
+    category: cong_viec
+    severity: warn
+    applies_to: [BHXH, BHYT]
+    rule: "Mã số BHXH / mã thẻ BHYT khớp nhất quán giữa các giấy tờ trong hồ sơ"
+    action: "Báo nếu không khớp"
+    condition: null
+    needs_llm: true
+
+  - code: "20.3"
+    category: cong_viec
+    severity: warn
+    applies_to: [BHXH]
+    rule: "Biên lai BHXH đủ 3 tháng gần nhất, không đứt quãng"
+    action: "Báo thiếu tháng / đứt quãng"
+    condition: null
+    needs_llm: true
+
   - code: "20.4"
     category: cong_viec
     severity: warn

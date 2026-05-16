@@ -82,22 +82,25 @@ RELATION_MAP = _load_relation_map_from_yaml()
 
 def extract_relation(applicant: str, subject: str, summary: str = "",
                       doc_tag: str = "", extracted: Optional[dict] = None) -> Optional[str]:
-    """Trả SOP relation tag (`bo`/`me`/`vo`/`con`...) nếu subject ≠ applicant VÀ có evidence.
+    """Trả SOP relation tag (`ba`/`me`/`vo`/`con`...) nếu subject ≠ applicant VÀ có evidence.
 
     P2.4 — siết heuristic:
       - Whitelist `doc_tag`: chỉ tag relation cho giấy tờ nhân thân (CCCD, GKS, GPLX,
         Passport, Ca vet xe, So dat, STK, Vang, XN so du, GKH, LLTP). Không tag cho
         Sao ke / HD / Bien lai / Anh — đỡ "Khac con-..." vô căn cứ.
-      - Ground truth từ `extracted`: nếu subject trùng `ho_ten_cha` → tag `bo`; trùng
-        `ho_ten_me` → `me`; trùng `ho_ten_vo_chong` → `vo`/`chong` (theo gender nếu có).
+      - Ground truth từ `extracted`: nếu `ho_ten_cha/me/vo_chong` TRÙNG APPLICANT (không
+        phải subject) → tag relation tương ứng. Logic: GKS của con có cha/mẹ = applicant
+        → file đó là GKS con của applicant, relation = "ba"/"me".
       - Fallback summary: relation keyword phải xuất hiện **trong cùng cụm 30 ký tự**
         với tên subject (không phải scan toàn summary).
     """
     if not subject or not applicant:
         return None
-    a = strip_diacritics(applicant).lower().strip()
-    s = strip_diacritics(subject).lower().strip()
-    if not a or not s or a == s:
+    # Chuẩn hoá whitespace trước khi so sánh (OCR đôi khi trả tên có tab/newline embedded).
+    a = re.sub(r"\s+", " ", strip_diacritics(applicant).lower()).strip()
+    s = re.sub(r"\s+", " ", strip_diacritics(subject).lower()).strip()
+    # Thoát sớm nếu subject == applicant (exact hoặc name-equiv sau OCR noise).
+    if not a or not s or a == s or _name_equiv(a, s):
         return None
     # Whitelist doc_tag (None / "" → cho phép apply để giữ tương thích với caller cũ).
     _RELATION_DOC_TAGS = {
@@ -110,17 +113,19 @@ def extract_relation(applicant: str, subject: str, summary: str = "",
         return None
 
     # Ground-truth qua extracted (mạnh hơn fallback summary scan).
+    # So sánh với APPLICANT (a), không phải subject (s):
+    #   GKS của con → ho_ten_cha/me trên GKS = applicant → applicant là cha/mẹ của người trên giấy.
     if isinstance(extracted, dict):
         def _norm(x: str) -> str:
-            return strip_diacritics(str(x or "")).lower().strip()
+            return re.sub(r"\s+", " ", strip_diacritics(str(x or "")).lower()).strip()
         cha = _norm(extracted.get("ho_ten_cha"))
         me = _norm(extracted.get("ho_ten_me"))
         vo_chong = _norm(extracted.get("ho_ten_vo_chong"))
-        if cha and (cha == s or _name_equiv(cha, s)):
-            return "bo"
-        if me and (me == s or _name_equiv(me, s)):
+        if cha and cha != s and (cha == a or _name_equiv(cha, a)):
+            return "ba"
+        if me and me != s and (me == a or _name_equiv(me, a)):
             return "me"
-        if vo_chong and (vo_chong == s or _name_equiv(vo_chong, s)):
+        if vo_chong and vo_chong != s and (vo_chong == a or _name_equiv(vo_chong, a)):
             # Default `vo` (vợ) — staff thường lấy đứng tên đương đơn nam.
             # Nếu extracted.gioi_tinh="Nam" → còn lại `chong`.
             return "chong" if _norm(extracted.get("gioi_tinh")) == "nam" else "vo"
@@ -364,4 +369,16 @@ if __name__ == "__main__":
     assert extract_relation("Chu Thi Le", "Chu Thi Le", "") is None
     assert build_filename("CCCD", "Nguyen Van A", ".pdf", relation="ba") == "CCCD ba-Nguyen Van A.pdf"
     assert build_filename("CCCD", "Chu Thi Le", ".pdf") == "CCCD-Chu Thi Le.pdf"  # no-relation form không đổi
+    # Fix P2.4-gt — ground-truth so sánh applicant (không phải subject)
+    # GKS con có ho_ten_me = applicant → applicant là "me" (mẹ)
+    assert extract_relation("Tran Thi Mai Lan", "Nguyen Van X", "", doc_tag="GKS",
+                            extracted={"ho_ten_cha": "Nguyen Van Y", "ho_ten_me": "Tran Thi Mai Lan"}) == "me"
+    # GKS con có ho_ten_cha = applicant → applicant là "ba" (bố)
+    assert extract_relation("Nguyen Van A", "Nguyen Thi B", "", doc_tag="GKS",
+                            extracted={"ho_ten_cha": "Nguyen Van A", "ho_ten_me": "Tran Thi C"}) == "ba"
+    # GKS của chính applicant → a == s → return None (không tag relation)
+    assert extract_relation("Tran Thi Mai Lan", "Tran Thi Mai Lan", "",
+                            extracted={"ho_ten_me": "Tran Thi Mai Lan"}) is None
+    # OCR name có whitespace thừa → _name_equiv ngăn false-positive
+    assert extract_relation("Tran Thi Mai Lan", "Tran\tThi Mai  Lan", "con: Tran Thi Mai Lan") is None
     print("classify guards OK")

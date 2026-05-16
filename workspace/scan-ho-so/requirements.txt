@@ -1,0 +1,16 @@
+# Dep cho scan-ho-so app (telegram_listener.py + scan_pipeline.py + lib/*).
+# Cài: pip3 install --user --break-system-packages -r requirements.txt
+# Phiên bản pin theo môi trường prod hiện tại (CT102 claude-dev, 2026-05-15).
+# Pillow là BẮT BUỘC từ 2026-05-15 — multi-page PDF split rasterize page → JPEG.
+
+Pillow==12.2.0
+pypdf==6.11.0
+pypdfium2==5.8.0
+python-telegram-bot==22.7
+google-api-python-client==2.196.0
+google-auth==2.52.0
+google-auth-httplib2==0.4.0
+httpx==0.28.1
+PyYAML==6.0.1
+simpleeval==1.0.7
+google-cloud-documentai>=2.29.0

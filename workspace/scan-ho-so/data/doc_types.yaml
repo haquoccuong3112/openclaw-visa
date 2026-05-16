@@ -1,5 +1,5 @@
 # ============================================================================
-# Doc Types — 32 loại giấy tờ bot phân loại (data-driven Phase 4).
+# Doc Types — ~40 loại giấy tờ bot phân loại (Phase 4→5 mở rộng).
 # ============================================================================
 # Mỗi entry:
 #   tag:         SOP tag (CCCD, So dat, Sao ke…) — DÙNG TRONG FILENAME
@@ -47,7 +47,7 @@ doc_types:
         - dat nong nghiep
         - dat canh tac
         - gcn quyen su dung dat nong nghiep
-      filename: []
+      filename: ['so\s*dat\s*nn', 'dat\s*nong\s*nghiep', 'dat\s*nn', 'so\s*do\s*nn']
     in_checklist: [FARM-13-14, "19.1", "19.3", "19.4", "19.5", "19.6", "19.7"]
 
   - tag: DKKD
@@ -225,6 +225,7 @@ doc_types:
         - so yeu ly lich co xac nhan
         - syll co dau
         - so yeu ly lich da xac nhan
+        - so yeu ly lich    # bare — win trước CV vì SYLL đứng trước trong file
       filename: ['syll', 'so\s*yeu\s*ly\s*lich']
     in_checklist: [FARM-21, "11.1", "11.2", "11.3"]
 
@@ -262,9 +263,8 @@ doc_types:
       doc_type:
         - '\bcv\b'
         - curriculum vitae
-        - so yeu ly lich
+        # "so yeu ly lich" và "syll" bare đã được SYLL (đứng trước) bắt → bỏ khỏi CV
         - so yeu
-        - syll
         - thong tin ca nhan
         - thong tin gia dinh
         - tu khai

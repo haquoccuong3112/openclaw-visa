@@ -14,6 +14,7 @@ auth, Codex runtime — is OpenClaw runtime state and is **not** part of this re
 - `HEARTBEAT.md` — checklist for heartbeat runs
 - `MEMORY.md` — curated long-term memory
 - `memory/YYYY-MM-DD.md` — daily memory logs
+- `docs/` — reference documentation (setup, architecture, runbooks) — edit along the way
 - `skills/` — OpenClaw skills: stock ClawHub skills + the custom `scan-ho-so-pipeline`
 - `scan-ho-so/` — the `@donghanhprocessingbot` Telegram bot (systemd unit `donghanhbot.service`);
   `scan-ho-so/docs/` holds the visa-bot project notes

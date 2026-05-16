@@ -4,11 +4,20 @@ google-service-account.json
 *.pem
 *.key
 
+# temporary scratch / debug files
+tmp/
+
+# daily memory logs (ephemeral, not for version control)
+memory/
+
 # bot-generated / churny
 scan-ho-so/runs/
 scan-ho-so/test-runs/
+scan-ho-so/_checkpoints/
 scan-ho-so/group_registry.json
 scan-ho-so/group_registry.json.bak
+scan-ho-so/recent_cases.json
+scan-ho-so/recent_cases.json.tmp
 
 # python caches
 **/__pycache__/

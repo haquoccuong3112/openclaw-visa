@@ -114,6 +114,91 @@ def _provinces_text() -> str:
 
 
 # ===========================================================================
+# deterministic enrichers from DocAI summaries
+# ===========================================================================
+
+def _clean_ws(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+
+def _parse_ct07_from_summary(summary: str) -> dict:
+    """Parse common CT07/XNCT fields from DocAI text.
+
+    DocAI-plan sidecars often keep rich OCR text in `summary` but leave
+    `extracted` empty. Checklist must still use this text instead of blaming
+    the scan as blurry/unreadable. This parser is conservative: it only fills
+    fields that are explicitly present in the OCR text.
+    """
+    text = str(summary or "")
+    if not text.strip():
+        return {}
+    out: dict = {}
+
+    def first(pattern: str, flags: int = re.I) -> str:
+        m = re.search(pattern, text, flags)
+        return _clean_ws(m.group(1)) if m else ""
+
+    out["so_xac_nhan"] = first(r"Số\s*:\s*([^\n]+)")
+    out["nguoi_de_nghi"] = first(r"Theo đề nghị của\s+Ông/Bà\s*:\s*([^\n]+)")
+    out["ho_ten"] = first(r"Họ, chữ đệm và tên của\s+Ông/Bà\s*:\s*([^\n]+)")
+    out["ngay_sinh"] = first(r"Ngày, tháng, năm sinh\s*:\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})")
+    out["so_dinh_danh"] = first(r"Số định danh cá nhân\s*:\s*([0-9]{9,14})")
+    out["que_quan"] = first(r"Quê quán\s*:\s*([^\n]+)")
+    out["thuong_tru"] = first(r"Nơi thường trú\s*:\s*([^\n]+)")
+    out["tam_tru"] = first(r"Nơi tạm trú\s*:\s*([^\n]*)")
+    out["noi_o_hien_tai"] = first(r"Nơi ở hiện tại\s*:\s*([^\n]+)")
+    out["chu_ho"] = first(r"Họ, chữ đệm và tên chủ hộ\s*:\s*([^\n]+?)(?:\s+12\.|$)")
+    out["quan_he_voi_chu_ho"] = first(r"Quan hệ với chủ hộ\s*:\s*([^\n]+)")
+    valid = first(r"Giấy này có giá trị(?: sử dụng)? đến hết ngày\s+(?:ngày\s+)?([0-9]{1,2}\s+tháng\s+[0-9]{1,2}\s+năm\s+[0-9]{4})")
+    if valid:
+        out["gia_tri_den"] = valid
+    issue = first(r"ngày\s*\.\s*tháng\s*\.\s*năm\s*\.\.\.\s*([0-9]{4,5})")
+    if issue:
+        out["ngay_cap_raw"] = issue
+
+    members: list[dict] = []
+    row_re = re.compile(
+        r"(?:^|\n)\s*(\d{1,2})\s*\n\s*"
+        r"([^\n]+?)\s*\n\s*"
+        r"([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\s+"
+        r"(Nam|Nữ)\s+([0-9]{9,14})\s*\n\s*([^\n]+)",
+        re.I,
+    )
+    for m in row_re.finditer(text):
+        members.append({
+            "stt": m.group(1),
+            "ho_ten": _clean_ws(m.group(2)),
+            "ngay_sinh": m.group(3),
+            "gioi_tinh": m.group(4),
+            "so_dinh_danh": m.group(5),
+            "quan_he_voi_chu_ho": _clean_ws(m.group(6)),
+        })
+    if members:
+        out["thanh_vien_ho_gia_dinh"] = members
+
+    return {k: v for k, v in out.items() if v not in ("", [], None)}
+
+
+def _enrich_entry_from_summary(entry: dict) -> dict:
+    """Fill deterministic fields from `tom_tat` without extra AI calls."""
+    tag = str(entry.get("loai") or "").upper()
+    name = str(entry.get("ten") or "")
+    summary = str(entry.get("tom_tat") or "")
+    is_ct07 = tag == "XNCT" or "CT07" in summary.upper() or "Xác nhận thông tin về cư trú" in summary or "XNCT" in name.upper()
+    if is_ct07:
+        parsed = _parse_ct07_from_summary(summary)
+        if parsed:
+            data = dict(entry.get("du_lieu") or {})
+            for k, v in parsed.items():
+                data.setdefault(k, v)
+            entry["du_lieu"] = data
+            entry["ocr_quality_note"] = (
+                "DocAI summary có nội dung đọc được; không coi là scan mờ chỉ vì extracted/du_lieu ban đầu trống."
+            )
+    return entry
+
+
+# ===========================================================================
 # dataset: gom toàn bộ sidecar .json của case
 # ===========================================================================
 def build_dataset(case_folder_id: str, drive_id: str | None = None) -> list[dict]:
@@ -148,6 +233,7 @@ def build_dataset(case_folder_id: str, drive_id: str | None = None) -> list[dict
             "loai": d.get("tag", ""),
             "folder": d.get("folder", ""),
             "nguoi": d.get("subject", ""),
+            "quan_he": d.get("relation", ""),  # quan hệ với đương đơn: "me","ba","con","vo","chong",""
             "tom_tat": d.get("summary", ""),
             "du_lieu": d.get("extracted") if isinstance(d.get("extracted"), dict) else {},
             "key_fields": gem.get("key_fields") if isinstance(gem.get("key_fields"), dict) else {},
@@ -156,7 +242,9 @@ def build_dataset(case_folder_id: str, drive_id: str | None = None) -> list[dict
             "drive_link": d.get("drive_link", ""),
             "ngay_xu_ly": d.get("generated_at") or d.get("case_id", ""),
             "content_hash": d.get("content_hash", ""),
+            "source": d.get("source", "bot"),   # "bot" | "da-duyet" (staff-verified)
         }
+        entry = _enrich_entry_from_summary(entry)
         h = entry["content_hash"]
         if h:
             prev = by_hash.get(h)
@@ -167,6 +255,21 @@ def build_dataset(case_folder_id: str, drive_id: str | None = None) -> list[dict
             no_hash.append(entry)
     out = list(by_hash.values()) + no_hash
     out.sort(key=lambda r: (r["loai"], r["ten"]))
+
+    # Da-duyet override: nếu staff đã put file vào "Đã duyệt/", dùng bản đó → bỏ bản bot cùng loai+nguoi.
+    # Chỉ override khi da-duyet file đã classify được (không Khac) để tránh mất dữ liệu bot vô ích.
+    da_duyet_keys = {
+        (e["loai"].lower(), (e.get("nguoi") or "").lower())
+        for e in out
+        if e.get("source") == "da-duyet" and e.get("loai") and e["loai"] != "Khac"
+    }
+    if da_duyet_keys:
+        out = [
+            e for e in out
+            if e.get("source") == "da-duyet"
+            or (e.get("loai", "").lower(), (e.get("nguoi") or "").lower()) not in da_duyet_keys
+        ]
+
     return out
 
 
@@ -259,14 +362,17 @@ giữa các giấy tờ, và xuất báo cáo theo đúng format yêu cầu.
 - Ngày kiểm tra: {{TODAY}}
 - Tên khách hàng: {{APPLICANT}}
 - Nội dung OCR hồ sơ: cung cấp ở message tiếp theo dưới dạng JSON — mỗi phần tử là một giấy tờ với
-  `ten` (tên file đã chuẩn hoá), `loai` (mã loại giấy tờ), `nguoi` (người trên giấy), `tom_tat`,
-  `du_lieu` (các trường trích từ OCR), `key_fields`, `confidence` ("high"|"medium"|"low"),
+  `ten` (tên file đã chuẩn hoá), `loai` (mã loại giấy tờ), `nguoi` (người trên giấy),
+  `quan_he` (quan hệ của `nguoi` với đương đơn: "me"=mẹ đương đơn, "ba"=bố, "con"=con, "vo"=vợ, "chong"=chồng, ""=chính đương đơn),
+  `tom_tat`, `du_lieu` (các trường trích từ OCR), `key_fields`, `confidence` ("high"|"medium"|"low"),
   `needs_review` (true ⇒ scan mờ / viết tay / phân loại chưa chắc — KHÔNG dùng giấy đó làm chuẩn để bắt lỗi giấy khác).
+  Nếu `du_lieu` trống nhưng `tom_tat` có OCR chi tiết thì PHẢI dùng `tom_tat` làm nguồn dữ liệu; tuyệt đối không kết luận file mờ chỉ vì thiếu structured fields.
 
 # NGUYÊN TẮC LÀM VIỆC BẮT BUỘC
 
 1. **KHÔNG SUY ĐOÁN**: Chỉ kết luận dựa trên dữ liệu OCR có thật. Nếu OCR mờ/
    thiếu/không rõ → ghi "KHÔNG ĐỌC ĐƯỢC - cần kiểm tra bản gốc".
+   **CẤM hallucination về chất lượng scan**: chỉ được nói "scan mờ/OCR không đọc được" khi `needs_review=true`, `confidence`="low", hoặc `tom_tat` quá ngắn/không có dữ liệu. Nếu `confidence`="high", `needs_review=false` và `tom_tat` có nội dung đọc được thì coi OCR dùng được; nếu `du_lieu` thiếu, ghi "chưa bóc được trường cấu trúc" chứ KHÔNG đổ lỗi file mờ.
 
 2. **ĐỐI CHIẾU CHÉO TRIỆT ĐỂ**: Mọi thông tin trùng lặp giữa các giấy tờ
    (họ tên, ngày sinh, số CMND/CCCD, địa chỉ, tên cha mẹ...) phải được so
@@ -275,6 +381,15 @@ giữa các giấy tờ, và xuất báo cáo theo đúng format yêu cầu.
    mẫu khách tự ghi): khác biệt nhỏ kiểu đó nhiều khả năng chỉ là OCR đọc sai chữ viết tay → ghi 🟢/🟡 "OCR thấp tin
    cậy — cần đối chiếu bản gốc", **KHÔNG phải lỗi 🔴**. Một tờ TỰ KHAI / viết tay KHÔNG phải CCCD / giấy chính thức kể
    cả khi nó có ghi số CCCD — đừng dùng nó làm chuẩn để bắt lỗi giấy khác.
+   — **QUAN TRỌNG với bằng cấp / giấy tờ chữ viết tay**: nhiều bằng cấp cũ (bằng cấp 2, chứng chỉ xưa) viết tay hoặc
+   OCR kém → `needs_review=true`. Với các file này, **TUYỆT ĐỐI KHÔNG báo 🔴** do "tên không khớp" / "địa chỉ không khớp"
+   / "nghi vấn" — chỉ ghi 🟡 "OCR thấp tin cậy — cần kiểm tra bản gốc" kèm tên file. KHÔNG suy diễn mâu thuẫn từ
+   dữ liệu OCR mờ.
+
+5. **TRƯỜNG `quan_he`**: Mỗi file có `quan_he` cho biết người trên giấy là ai trong hồ sơ. Khi kiểm tra thông tin
+   cha/mẹ trên CCCD/khai sinh/LLTP đương đơn, đối chiếu với `nguoi` của file có `quan_he`="ba"/"me" (bằng tên người
+   trên giấy đó). Ví dụ: "CCCD me-Mai Lan.pdf" có `quan_he`="me" → `nguoi` trên file này = tên mẹ đương đơn → kiểm tra
+   tên mẹ trên CCCD/khai sinh đương đơn có khớp không; nếu khớp → ghi ✅; nếu lệch → 🟡 hoặc 🔴 tùy mức độ.
 
 3. **TÍNH TOÁN NGÀY THÁNG**: Mọi thời hạn phải tính từ ngày kiểm tra ở trên.
    Hiển thị rõ phép tính (VD: "Cấp 22/01/2026, đến {{TODAY}} = 3 tháng 20
@@ -409,7 +524,14 @@ giấy tờ, dạng:
 
 5. **Địa giới hành chính sau 12/06/2025 (tỉnh) / 01/07/2025 (xã/phường)**: đối chiếu `_dia_gioi` / danh sách 34 đơn vị mới.
 
-6. **VISION COMPARE (Mức 3)**: phần `_vision_compare` (nếu có) là kết quả gemini-2.5-pro SO SÁNH ảnh chân
+6. **Thẻ ngân hàng KHÔNG phải bằng chứng tài sản**: thẻ tín dụng, thẻ ghi nợ, thẻ Visa/Mastercard/JCB của ngân hàng
+   (VCB, BIDV, TCB, ACB…) **KHÔNG được chấp nhận** thay cho sổ tiết kiệm (`loai`="STK") hay sao kê (`loai`="Sao ke").
+   Nếu phát hiện bất kỳ file nào thực chất là ảnh thẻ ngân hàng (ghi số thẻ 16 số, thương hiệu Visa/MC, ngày hết hạn
+   dạng MM/YY) → báo **🔴 LỖI NGHIÊM TRỌNG** tại PHẦN 3: "Thẻ ngân hàng không phải giấy tờ chứng minh tài chính hợp lệ
+   theo FARM — yêu cầu sổ tiết kiệm gốc hoặc sao kê tài khoản có dấu đỏ". **Phần PHẦN 1 KHÔNG được liệt kê file thẻ
+   ngân hàng là "chuẩn xác".**
+
+7. **VISION COMPARE (Mức 3)**: phần `_vision_compare` (nếu có) là kết quả gemini-2.5-pro SO SÁNH ảnh chân
    dung trên ảnh thẻ với ảnh trên hộ chiếu / GPLX / CCCD — COI LÀ GROUND-TRUTH, KHÔNG tự dò lại.
    - `same_person`=false (confidence=high) → **🔴 LỖI NGHIÊM TRỌNG**: 2 ảnh KHÁC NGƯỜI → ghi rule code `[8.3+]`
      vào PHẦN 3, đề xuất kiểm tra hồ sơ khẩn cấp.
@@ -551,17 +673,19 @@ def _trim_dataset_for_llm(dataset: list[dict]) -> list[dict]:
             "ten": d.get("ten", ""),
             "loai": d.get("loai", ""),
             "nguoi": d.get("nguoi", ""),
+            "quan_he": d.get("quan_he", ""),  # quan hệ với đương đơn: "me"=mẹ,"ba"=bố,"con"=con,"vo"=vợ,"chong"=chồng
             "tom_tat": (d.get("tom_tat") or "")[:800],
             "du_lieu": d.get("du_lieu") or {},
             "key_fields": d.get("key_fields") or {},
             "confidence": d.get("confidence", ""),       # "high"|"medium"|"low" — độ tin cậy OCR/phân loại
             "needs_review": bool(d.get("needs_review")),  # True = scan mờ / viết tay / phân loại chưa chắc
+            "ocr_quality_note": d.get("ocr_quality_note", ""),
         })
     return out
 
 
 async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
-                                   timeout: int = 300) -> str:
+                                   timeout: int = 300, temperature: float = 0.1) -> str:
     """Gọi OpenRouter với stream=True. Yield từng delta qua callback `on_chunk(text_delta)`
     (async function). Trả về full text cuối cùng. Caller dùng on_chunk để edit Telegram tin.
 
@@ -581,7 +705,7 @@ async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.1,
+        "temperature": temperature,
         "stream": True,
     }
     buf: list[str] = []
@@ -629,31 +753,38 @@ async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
 
 
 def _call_openrouter(model: str, system: str, user: str, timeout: int = 300,
-                     json_mode: bool = False) -> str:
-    """Gọi OpenRouter chat/completions. Trả về content (đã strip fences).
-    json_mode=True → thêm response_format json_object; nếu HTTP ≥400 thì retry KHÔNG kèm
-    response_format (vài model không nhận). Caller tự json.loads nếu cần."""
+                     json_mode: bool = False, temperature: float = 0.1) -> str:
+    """Gọi LLM qua OpenRouter hoặc DeepSeek direct API.
+    Nếu model là "deepseek/*" và DEEPSEEK_API_KEY có → dùng api.deepseek.com (tránh OpenRouter queue).
+    json_mode=True → thêm response_format json_object; retry không kèm nếu HTTP ≥400."""
     import httpx
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY chưa được cấu hình")
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    use_direct = deepseek_key and model.startswith("deepseek/")
+    if use_direct:
+        api_endpoint = "https://api.deepseek.com/v1/chat/completions"
+        api_key = deepseek_key
+        direct_model = model.split("/", 1)[1]  # "deepseek/deepseek-v4-pro" → "deepseek-v4-pro"
+    else:
+        api_endpoint = "https://openrouter.ai/api/v1/chat/completions"
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        direct_model = model
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY chưa được cấu hình")
     payload = {
-        "model": model,
+        "model": direct_model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.1,
+        "temperature": temperature,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     with httpx.Client(timeout=timeout) as client:
-        resp = client.post("https://openrouter.ai/api/v1/chat/completions",
-                           headers={"Authorization": f"Bearer {api_key}"}, json=payload)
+        resp = client.post(api_endpoint, headers={"Authorization": f"Bearer {api_key}"}, json=payload)
         if json_mode and resp.status_code >= 400:
             payload.pop("response_format", None)
-            resp = client.post("https://openrouter.ai/api/v1/chat/completions",
-                               headers={"Authorization": f"Bearer {api_key}"}, json=payload)
+            resp = client.post(api_endpoint, headers={"Authorization": f"Bearer {api_key}"}, json=payload)
     resp.raise_for_status()
     content = resp.json()["choices"][0]["message"]["content"]
     return _strip_fences(content or "")
@@ -664,8 +795,9 @@ def _call_openrouter(model: str, system: str, user: str, timeout: int = 300,
 # ===========================================================================
 _PROFILE_EXTRACT_SYSTEM = """Bạn là trợ lý trích xuất & chuẩn hoá hồ sơ visa Canada (LMIA).
 Đầu vào (message kế tiếp): JSON liệt kê các giấy tờ đã OCR — mỗi phần tử có `ten`, `loai`,
-`nguoi`, `tom_tat`, `du_lieu`, `key_fields`, `confidence` ("high"|"medium"|"low") và `needs_review` (true = scan mờ /
-viết tay / phân loại chưa chắc).
+`nguoi`, `quan_he` (quan hệ của người trên giấy với đương đơn: "me"=mẹ, "ba"=bố, "con"=con, "vo"=vợ, "chong"=chồng, ""=chính đương đơn),
+`tom_tat`, `du_lieu`, `key_fields`, `confidence` ("high"|"medium"|"low") và `needs_review` (true = scan mờ /
+viết tay / phân loại chưa chắc — chỉ copy giá trị, KHÔNG dùng làm chuẩn).
 
 NHIỆM VỤ: gom toàn bộ dữ liệu thành MỘT JSON object hồ sơ thống nhất, theo schema dưới.
 
@@ -679,7 +811,8 @@ QUY TẮC TUYỆT ĐỐI:
   chiếu bản gốc)". TUYỆT ĐỐI không coi giấy đó là nguồn chuẩn cho họ tên / số giấy tờ / địa chỉ khi nó lệch với một
   giấy CHÍNH THỨC do cơ quan cấp (CCCD thật, hộ chiếu, khai sinh, LLTP, CT07…). Một tờ tự khai/viết tay KHÔNG phải
   CCCD/giấy chính thức kể cả khi nó có ghi số CCCD.
-- Nếu OCR mờ/thiếu → để chuỗi rỗng "" hoặc mảng rỗng [], và ghi lý do vào `notes`.
+- Nếu `du_lieu` trống nhưng `tom_tat` có nội dung OCR chi tiết thì PHẢI đọc và copy từ `tom_tat`; không được tự kết luận file mờ.
+- Chỉ ghi scan mờ/OCR không đọc được khi `needs_review=true`, `confidence`="low", hoặc `tom_tat` quá ngắn/không có dữ liệu. Nếu thiếu structured field nhưng summary đọc được, ghi "chưa bóc được trường cấu trúc".
 - Không bịa. Chỉ điền cái thật sự đọc được.
 - Trả về JSON object MỘT DÒNG, THUẦN (không markdown, không chữ ngoài JSON).
 
@@ -804,11 +937,12 @@ def render_doc_md(report_text: str, applicant: str, today: str, model: str,
     parts.append(_coverage_md_table(coverage))
     parts.append("")
     parts.append("## 📎 Phụ lục — danh sách file đã OCR trong hồ sơ")
-    parts.append("| # | Tên file | Loại | Người | Tóm tắt |")
-    parts.append("|---|---|---|---|---|")
+    parts.append("| # | Tên file | Loại | Người | Quan hệ | Tóm tắt |")
+    parts.append("|---|---|---|---|---|---|")
     for i, d in enumerate(dataset, 1):
         tt = (d.get("tom_tat") or "").replace("\n", " ").replace("|", "/")[:220]
-        parts.append(f"| {i} | {d.get('ten','')} | {d.get('loai','')} | {d.get('nguoi','')} | {tt} |")
+        qh = d.get("quan_he") or ""
+        parts.append(f"| {i} | {d.get('ten','')} | {d.get('loai','')} | {d.get('nguoi','')} | {qh} | {tt} |")
     parts.append("")
     parts.append(f"_Báo cáo do bot tạo tự động · model {model} · {today} · {len(dataset)} giấy tờ. "
                  f"Đây là bản rà soát máy — nhân viên cần đối chiếu lại bản gốc trước khi nộp._")

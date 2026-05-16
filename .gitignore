@@ -17,6 +17,8 @@ workspace/scan-ho-so/runs/
 workspace/scan-ho-so/test-runs/
 workspace/scan-ho-so/group_registry.json
 workspace/scan-ho-so/group_registry.json.bak
+workspace/scan-ho-so/recent_cases.json
+workspace/scan-ho-so/recent_cases.json.tmp
 workspace/**/__pycache__/
 workspace/**/*.pyc
 workspace/**/*.bak

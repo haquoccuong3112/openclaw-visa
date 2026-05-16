@@ -50,6 +50,7 @@ CHAT_CONCURRENCY = int(os.environ.get("CHAT_CONCURRENCY", "4"))
 CHAT_USER_COOLDOWN = float(os.environ.get("CHAT_USER_COOLDOWN", "3"))   # 1 user 1 câu / ngần này giây
 CHAT_MAX_FILEBYTES = int(os.environ.get("CHAT_MAX_FILEBYTES", "9000000"))  # file lớn hơn → không OCR lại
 CHAT_ANSWER_MAXLEN = 4000
+CHAT_TEMPERATURE = float(os.environ.get("CHAT_TEMPERATURE", "0.3"))
 
 CHAT_SEMAPHORE = asyncio.Semaphore(CHAT_CONCURRENCY)
 
@@ -99,6 +100,22 @@ def _toks(s: str) -> set:
     return set(_TOKEN_RE.findall(_norm(s))) - _STOPWORDS
 
 
+def _name_vocab(my_cases: list) -> set:
+    """Tập union mọi token trong applicant của my_cases — KHÔNG bỏ stopword.
+    Dùng để biết token nào trong message là TÊN người (giữ lại) vs xưng hô (bỏ)."""
+    vocab: set = set()
+    for _, info in my_cases:
+        vocab |= set(_TOKEN_RE.findall(_norm(info.get("applicant", "") or "")))
+    return vocab
+
+
+def _toks_with_namevocab(s: str, name_vocab: set) -> set:
+    """Giống _toks nhưng GIỮ token là tên người (vd 'Anh', 'Chi', 'Em', 'A') nếu có trong vocab.
+    Cứu trường hợp tên KH chứa token vốn là xưng hô tiếng Việt."""
+    raw = set(_TOKEN_RE.findall(_norm(s)))
+    return {t for t in raw if t in name_vocab or t not in _STOPWORDS}
+
+
 # ===========================================================================
 # Cooldown chống spam
 # ===========================================================================
@@ -130,13 +147,29 @@ def cases_for_staff(reg: dict, user_id) -> list:
 
 
 def _match_case(user_message: str, my_cases: list):
-    """Khớp `user_message` với danh sách case theo token tên KH (đã bỏ stopword tiếng Việt).
-    Trả (info|None, conflicting:list). info != None ⇔ DUY NHẤT 1 case có độ trùng token cao nhất.
-    conflicting = các case cùng đỉnh khi >1 (để bot hỏi lại, có liệt kê); [] nếu không case nào trùng token nào."""
-    msg = _toks(user_message)
+    """Khớp `user_message` với danh sách case. Hai cơ chế:
+      (a) **Substring instant-match**: nếu `_norm(applicant_full)` (≥6 ký tự) là substring
+          của `_norm(user_message)` cho DUY NHẤT 1 case → trả case đó ngay (gõ/dán đủ tên ăn liền).
+      (b) **Scoring overlap token** — stopword-aware: tokens là TÊN người vẫn giữ lại
+          (vd 'Anh', 'Chi', 'Em' khi xuất hiện trong applicant của ≥1 case trong my_cases).
+
+    Trả (info|None, conflicting:list). info != None ⇔ DUY NHẤT 1 case thắng.
+    conflicting = các case cùng đỉnh khi >1; [] nếu không case nào match."""
+    if not my_cases:
+        return None, []
+    name_vocab = _name_vocab(my_cases)
+    msg_norm = _norm(user_message)
+    # (a) Substring instant-match — bắt được "Nguyễn Thị Anh 1999", "DH Pro WP10m - Nguyễn Thị Anh 1999 …"
+    substring_hits = [info for _, info in my_cases
+                      if (an := _norm(info.get("applicant", "") or "")) and len(an) >= 6 and an in msg_norm]
+    if len(substring_hits) == 1:
+        return substring_hits[0], []
+    # (b) Scoring overlap, stopword-aware
+    msg = _toks_with_namevocab(user_message, name_vocab)
     if not msg:
         return None, []
-    scored = [(len(msg & _toks(info.get("applicant", ""))), info) for _, info in my_cases]
+    scored = [(len(msg & _toks_with_namevocab(info.get("applicant", ""), name_vocab)), info)
+              for _, info in my_cases]
     scored = [(n, info) for n, info in scored if n > 0]
     if not scored:
         return None, []
@@ -385,13 +418,14 @@ def web_search(query: str, model: str | None = None, max_results: int | None = N
 _OFFICER_SYSTEM = """Bạn là một viên chức thẩm định hồ sơ visa Canada (visa officer) chuyên nghiệp, đang HỖ
 TRỢ NHÂN VIÊN xử lý hồ sơ về MỘT khách hàng cụ thể (thông tin dưới đây). Trả lời bằng tiếng Việt.
 
-PHONG CÁCH BẮT BUỘC:
-- Chuyên nghiệp, kỹ càng, đi thẳng vào vấn đề. KHÔNG nịnh, KHÔNG khách sáo thừa thãi, KHÔNG "dạ vâng" lan
-  man, KHÔNG cảm thán, KHÔNG mở đầu kiểu "Chào bạn, rất vui được hỗ trợ...". Vào thẳng nội dung.
-- Ngắn gọn; nêu con số / ngày cụ thể.
+PHONG CÁCH:
+- Tự nhiên và thân thiện như đồng nghiệp — ngắn gọn, không lan man. Câu chào/cảm ơn/tạm biệt → trả lời
+  1 câu ngắn tự nhiên (không cần dẫn hồ sơ); câu hỏi về hồ sơ → vào thẳng nội dung.
+- Nêu con số / ngày cụ thể. Không "dạ vâng" lan man, không mở đầu sáo rỗng dài dòng.
 - TIN NHẮN PHẲNG: KHÔNG dùng định dạng markdown — KHÔNG in đậm (**...**), KHÔNG in nghiêng (*...* / _..._),
-  KHÔNG gạch chân, KHÔNG code (`...`), KHÔNG tiêu đề (#). Chỉ văn bản thường; khi liệt kê thì đánh số
-  "1." "2." hoặc gạch đầu dòng "-". Tên file viết bình thường (KHÔNG backtick, KHÔNG bọc ngoặc, KHÔNG kèm URL).
+  KHÔNG gạch chân, KHÔNG code (`...`), KHÔNG tiêu đề (#). Chỉ văn bản thường. Khi câu trả lời có nhiều ý
+  rời rạc → đánh số "1." "2." hoặc gạch đầu dòng "-", mỗi ý trên dòng riêng; dùng dòng trống phân tách
+  khi trả lời dài. Tên file viết bình thường (KHÔNG backtick, KHÔNG bọc ngoặc, KHÔNG kèm URL).
 - Khi nêu một dữ kiện về hồ sơ → DẪN NGUỒN: ghi đúng TÊN FILE của giấy tờ đó (trường `ten` trong DỮ LIỆU
   bên dưới), vd: theo CCCD-Hoang Thi Mo …, trên LLTP-Hoang Thi Mo ghi ….
 - CHỈ dựa trên DỮ LIỆU HỒ SƠ + BÁO CÁO THẨM ĐỊNH + (nếu có) NGUYÊN VĂN GIẤY TỜ / KẾT QUẢ TRA CỨU được cung
@@ -407,8 +441,10 @@ PHONG CÁCH BẮT BUỘC:
 - TUYỆT ĐỐI không tiết lộ thông tin của bất kỳ khách hàng nào khác ngoài hồ sơ này.
 - Mặc định: gần như MỌI câu hỏi của nhân viên trong khung này đều LIÊN QUAN đến hồ sơ này — hãy cố trả lời
   theo hướng đó (kể cả câu nói tắt / mơ hồ / kèm yêu cầu phụ như "gửi link", "in ra", "tôi check lại"…).
-  CHỈ từ chối khi câu hỏi RÕ RÀNG ngoài lề (thời tiết, tin tức chung, chuyện cá nhân không dính hồ sơ);
-  lúc đó mới trả lời 1 câu rằng bạn chỉ hỗ trợ về hồ sơ này.
+  Câu hỏi CHUNG về visa/thủ tục FARM (không cần đọc giấy tờ cụ thể, vd "FARM cần mấy tháng sao kê?") →
+  dùng NEED_WEB để tra thay vì từ chối. CHỈ từ chối khi câu hỏi RÕ RÀNG ngoài lề không liên quan gì đến
+  visa/hồ sơ (thời tiết, tin tức, chuyện riêng tư thuần túy); lúc đó mới trả lời ngắn tự nhiên rồi hỏi
+  nhân viên cần giúp gì về hồ sơ.
 - LINK: KHÔNG tự dán URL Drive. Khi nhân viên muốn mở / xem / "check lại" / DẪN LINK / GỬI LINK / URL /
   đường dẫn của một (hoặc vài) giấy tờ cụ thể → chỉ cần NHẮC ĐÚNG TÊN FILE của giấy tờ đó Y NGUYÊN
   như trong DỮ LIỆU (trường `ten`), MỖI tên file 1 dòng, KHÔNG kèm chú thích/giải thích/URL. Hệ thống tự
@@ -436,6 +472,16 @@ cần — dữ liệu hiện có đã đủ thì TRẢ LỜI LUÔN, đừng yêu
    KHÔNG tự đổi khi nhân viên không yêu cầu rõ. Bot sẽ hỏi nhân viên xác nhận trước khi đổi.
 Trong mọi trường hợp: KHÔNG thêm lời dẫn/giải thích nào khác — bot sẽ xử lý rồi phản hồi/hỏi bạn lại.
 KHÔNG dùng các cơ chế này cho câu hỏi ngoài lề (thời tiết, tin tức chung… — những câu đó vẫn từ chối như quy định ở trên)."""
+
+_GENERAL_SYSTEM = """Bạn là trợ lý hỗ trợ nhân viên Đồng Hành / ALLY về visa Canada (FARM / LMIA / Work Permit).
+Trả lời bằng tiếng Việt. Tự nhiên, thân thiện như đồng nghiệp.
+
+- Câu chào / cảm ơn / tin nhắn thông thường → trả lời ngắn gọn tự nhiên, hỏi có cần giúp gì không.
+- Câu hỏi về quy trình, danh sách giấy tờ, chính sách visa Canada → trả lời trực tiếp nếu biết chắc, hoặc dùng:
+  NEED_WEB: <truy vấn ngắn gọn tiếng Việt>
+- Câu hỏi cần hồ sơ cụ thể → hướng dẫn nhân viên nhắn trong nhóm Pro hoặc dùng /case trong DM để chọn ca.
+
+KHÔNG in đậm markdown (**...**). Liệt kê nhiều ý thì dùng "1." "2." hoặc "-", mỗi ý dòng riêng."""
 
 _NEED_FILE_RE = re.compile(r"^\s*NEED_FILE\s*:\s*(.+?)\s*$", re.IGNORECASE)
 _NEED_WEB_RE = re.compile(r"^\s*NEED_WEB\s*:\s*(.+?)\s*$", re.IGNORECASE)
@@ -872,12 +918,14 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
         if stream_callback:
             try:
                 text = (await _call_openrouter_stream(model, sysprompt, mk_user(),
-                                                       stream_callback) or "").strip()
+                                                       stream_callback, temperature=CHAT_TEMPERATURE) or "").strip()
             except Exception as e:  # noqa: BLE001 — fallback non-stream
                 print(f"chat: stream lỗi ({type(e).__name__}: {e}) — fallback non-stream", flush=True)
-                text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user()) or "").strip()
+                text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(),
+                                                 temperature=CHAT_TEMPERATURE) or "").strip()
         else:
-            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user()) or "").strip()
+            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(),
+                                             temperature=CHAT_TEMPERATURE) or "").strip()
         # ── Yêu cầu đổi tên file? (xử lý trước NEED_FILE/NEED_WEB) ──
         wren = parse_need_rename(text)
         if wren is not None:
@@ -908,7 +956,8 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
             ans_addr = await asyncio.to_thread(addr_lookup_text, waddr)
             extra = f"--- TRA CỨU ĐỊA GIỚI HÀNH CHÍNH (bảng chính thức, deterministic — coi là chính xác) cho «{waddr}» ---\n{ans_addr}\n"
             print(f"chat: NEED_ADDR -> tra «{waddr}»", flush=True)
-            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(extra)) or "").strip()
+            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(extra),
+                                             temperature=CHAT_TEMPERATURE) or "").strip()
             if parse_need_addr(text) is not None or _is_need_file(text) is not None or _is_need_web(text) is not None:
                 text = "Cần kiểm tra thêm — chưa đủ căn cứ để kết luận chắc chắn."
         elif wfile is not None:
@@ -927,7 +976,8 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
             else:
                 extra = (f"(LƯU Ý: không tìm thấy giấy tờ tên '{wfile}' trong hồ sơ. Trả lời dựa trên dữ liệu "
                          f"hiện có; nếu cần, gợi ý nhân viên kiểm tra lại tên file.)\n")
-            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(extra)) or "").strip()
+            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(extra),
+                                             temperature=CHAT_TEMPERATURE) or "").strip()
             if _is_need_file(text) is not None or _is_need_web(text) is not None:
                 text = "Cần kiểm tra thêm — chưa đủ dữ liệu để trả lời chính xác."
         elif wweb is not None:
@@ -939,7 +989,8 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
             else:
                 extra = (f"(LƯU Ý: không tra cứu được thông tin ngoài cho '{wweb}'. Trả lời dựa trên dữ liệu "
                          f"hiện có và nêu rõ giới hạn này — vd: 'cần kiểm tra văn bản chính thức về địa giới hành chính'.)\n")
-            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(extra)) or "").strip()
+            text = (await asyncio.to_thread(_call_openrouter, model, sysprompt, mk_user(extra),
+                                             temperature=CHAT_TEMPERATURE) or "").strip()
             if _is_need_web(text) is not None or _is_need_file(text) is not None:
                 text = "Cần kiểm tra thêm thông tin chính thức — chưa đủ căn cứ để kết luận chắc chắn."
         if not text:
@@ -950,6 +1001,37 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
     if len(text) > CHAT_ANSWER_MAXLEN:
         text = text[:CHAT_ANSWER_MAXLEN].rstrip() + "\n…(rút gọn — hỏi tiếp nếu cần chi tiết)"
     return text
+
+
+async def answer_general(history, question: str, stream_callback=None) -> str:
+    """Trả lời câu hỏi chung (không cần case context): small talk + visa Canada chung."""
+    from .checklist import _call_openrouter, _call_openrouter_stream
+    model = CHAT_MODEL_HARD if is_hard_question(question) else CHAT_MODEL_FAST
+    hist = _history_text(history)
+    user_msg = f"--- LỊCH SỬ GẦN ĐÂY ---\n{hist}\n--- CÂU HỎI ---\n{question}"
+    try:
+        if stream_callback:
+            text = (await _call_openrouter_stream(model, _GENERAL_SYSTEM, user_msg,
+                                                   stream_callback, temperature=CHAT_TEMPERATURE) or "").strip()
+        else:
+            text = (await asyncio.to_thread(_call_openrouter, model, _GENERAL_SYSTEM, user_msg,
+                                             temperature=CHAT_TEMPERATURE) or "").strip()
+        wweb = _is_need_web(text)
+        if wweb:
+            web = await asyncio.to_thread(web_search, wweb)
+            if web:
+                extra = f"--- KẾT QUẢ TRA CỨU ---\n{web}\n"
+                user_msg2 = extra + user_msg
+                if stream_callback:
+                    text = (await _call_openrouter_stream(model, _GENERAL_SYSTEM, user_msg2,
+                                                           stream_callback, temperature=CHAT_TEMPERATURE) or "").strip()
+                else:
+                    text = (await asyncio.to_thread(_call_openrouter, model, _GENERAL_SYSTEM, user_msg2,
+                                                     temperature=CHAT_TEMPERATURE) or "").strip()
+    except Exception as e:  # noqa: BLE001
+        print(f"chat: answer_general lỗi: {type(e).__name__}: {e}", flush=True)
+        return "❌ Lỗi khi xử lý câu hỏi, thử lại sau ít phút."
+    return (text or "")[:CHAT_ANSWER_MAXLEN]
 
 
 # ===========================================================================
@@ -1091,13 +1173,13 @@ if __name__ == "__main__":
     print("CHAT_MODEL:", CHAT_MODEL, "| CHAT_SCAN_MODEL:", CHAT_SCAN_MODEL, "| CHAT_WEB_MODEL:", CHAT_WEB_MODEL)
     print("history_turns:", CHAT_HISTORY_TURNS, "| ctx_ttl:", CHAT_CTX_TTL, "| fulltext_ttl:", CHAT_FULLTEXT_TTL,
           "| web_ttl:", CHAT_WEB_TTL, "| cooldown:", CHAT_USER_COOLDOWN, "| concurrency:", CHAT_CONCURRENCY)
-    for fn in (build_case_context, get_case_context, invalidate_case_cache, answer_question, get_file_fulltext,
+    for fn in (build_case_context, get_case_context, invalidate_case_cache, answer_question, answer_general, get_file_fulltext,
                web_search, cases_for_staff, _match_case, pick_case_for_dm, group_history, dm_session, check_cooldown, linkify_answer,
                _strip_markdown_plain, parse_need_rename, parse_need_addr, addr_lookup_text, is_affirmative, is_negative,
                set_pending_rename, pop_pending_rename, _sanitize_new_name, do_rename, _try_link_intent):
         assert callable(fn), fn
     _sys_lc = _OFFICER_SYSTEM.lower()
-    assert "visa officer" in _sys_lc and "không nịnh" in _sys_lc and "need_file" in _sys_lc and "need_web" in _sys_lc
+    assert "visa officer" in _sys_lc and "tự nhiên" in _sys_lc and "need_file" in _sys_lc and "need_web" in _sys_lc
     assert "need_rename" in _sys_lc and "need_addr" in _sys_lc and "tên file" in _sys_lc and "{{DRIVE_LINK}}" in _OFFICER_SYSTEM
     assert "địa giới hành chính" in _sys_lc and "ground-truth" in _sys_lc and "doi_chieu" in _sys_lc  # mục địa-giới ground-truth
     assert "dẫn link" in _sys_lc and "y nguyên" in _sys_lc  # rule LINK mới: yêu cầu LLM lặp tên file y nguyên
@@ -1190,6 +1272,26 @@ if __name__ == "__main__":
     assert info is None and ask and "TEST6" not in ask and "TEST8" not in ask
     info, ask = pick_case_for_dm("vậy còn passport thì sao?", [("P1", c1), ("P2", c2)], "F2")
     assert info is c2 and ask is None
+    # === Regression bug: tên KH chứa token là xưng hô tiếng Việt (Anh / Chi / Em / A) ===
+    cA = {"applicant": "Nguyễn Thị Anh 1999", "folder_id": "FA", "kind": "pro", "case_setup": True}
+    cD = {"applicant": "Nguyễn Văn Duyệt 1999", "folder_id": "FD", "kind": "pro", "case_setup": True}
+    cS = {"applicant": "Nguyễn Quốc Sơn 2004", "folder_id": "FS", "kind": "pro", "case_setup": True}
+    triple = [("PA", cA), ("PD", cD), ("PS", cS)]
+    # 1. Substring match — gõ ĐỦ tên đầy đủ → ăn ngay, dù token "Anh" trước đây bị bỏ
+    info, ask = pick_case_for_dm("Nguyễn Thị Anh 1999 đến đâu rồi", triple, None)
+    assert info is cA and ask is None
+    # 2. Substring match — dán nguyên group title prefix vẫn ăn
+    info, ask = pick_case_for_dm("DH Pro WP10m - Nguyễn Thị Anh 1999 => khách này đến đâu rồi", triple, None)
+    assert info is cA and ask is None
+    # 3. Scoring — gõ "Anh 1999" (không substring đủ) — vẫn match vì 'Anh' nay được giữ làm tên
+    info, ask = pick_case_for_dm("báo cáo Anh 1999", [("PA", cA), ("PD", cD)], None)
+    assert info is cA and ask is None
+    # 4. Discriminator hiếm (Duyệt) — match cD
+    info, ask = pick_case_for_dm("báo cáo Duyệt 1999", [("PA", cA), ("PD", cD)], None)
+    assert info is cD and ask is None
+    # 5. Câu chung chung chỉ có "1999" → conflict, liệt kê 2 case 1999 (KHÔNG kèm Sơn 2004)
+    info, ask = pick_case_for_dm("hồ sơ 1999 thế nào", triple, None)
+    assert info is None and ask and "Anh" in ask and "Duyệt" in ask and "Sơn" not in ask
     reg = {"P1": {"kind": "pro", "case_setup": True, "staff": ["111", "222"], "applicant": "A", "folder_id": "F1"},
            "P2": {"kind": "pro", "case_setup": True, "staff": ["333"], "applicant": "B", "folder_id": "F2"},
            "K1": {"kind": "kh", "case_setup": True, "staff": ["111"], "applicant": "A"}}

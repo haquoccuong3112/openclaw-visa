@@ -47,7 +47,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from telegram import Update, Bot
+from telegram import Update, Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, ChatMigrated, TimedOut, NetworkError, RetryAfter
 from telegram.ext import (
@@ -55,6 +55,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ChatMemberHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -87,6 +88,7 @@ SCAN_DEBOUNCE_SECONDS  = float(os.environ.get("SCAN_DEBOUNCE_SECONDS", "8"))    
 SCAN_DEBOUNCE_MAX_WAIT = float(os.environ.get("SCAN_DEBOUNCE_MAX_WAIT", "90"))  # trần tổng chờ kể từ file đầu
 SCAN_DEBOUNCE_ACK = os.environ.get("SCAN_DEBOUNCE_ACK", "1") not in ("0", "", "false", "False")
 _PENDING_BATCHES: dict = {}   # key = KH chat_id (str) -> _PendingBatch
+_DOWNLOAD_SEM = asyncio.Semaphore(int(os.environ.get("SCAN_MAX_DOWNLOADS", "8")))  # tránh quá tải event loop
 
 async def send_message_handle_migration(bot: Bot, chat_id: int | str, text: str, **kwargs) -> str:
     """Send a message and return the effective chat id if Telegram migrated it."""
@@ -120,6 +122,7 @@ TOP_FOLDERS       = ["Personal Docs", "Education", "Asset", "Employment"]
 OCR_META_FOLDER   = "_Bot OCR & Metadata"
 OLD_FILE_FOLDER   = "Old File"          # inbox cho hồ sơ cũ trên Drive (xử lý bằng lệnh /oldfile)
 OLD_FILE_PROCESSED = "_processed"       # subfolder của Old File: lưu bản gốc sau khi đã xử lý
+DA_DUYET_FOLDER   = "Đã duyệt"          # staff review folder — bot đọc (OCR), không ghi file vào đây
 EXT_MIME = {
     ".pdf": "application/pdf",
     ".jpg": "image/jpeg",
@@ -129,7 +132,8 @@ EXT_MIME = {
 ZIP_EXTS = {".zip"}
 
 # ── Registry ─────────────────────────────────────────────────────────────────
-REGISTRY_PATH = Path(__file__).parent / "group_registry.json"
+REGISTRY_PATH    = Path(__file__).parent / "group_registry.json"
+_CHECKPOINT_DIR  = Path(__file__).parent / "_checkpoints"   # persist batch state across restarts
 
 def load_registry() -> dict:
     if REGISTRY_PATH.exists():
@@ -138,6 +142,46 @@ def load_registry() -> dict:
 
 def save_registry(reg: dict):
     REGISTRY_PATH.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+# ── Recent cases (DM /case picker) ──────────────────────────────────────────
+# Mỗi staff phụ trách hàng trăm case → flat list 100+ button không khả thi. Giữ 8 case
+# vừa được tương tác gần nhất per staff, hiển thị làm shortcut khi gõ /case không args.
+RECENT_CASES_PATH = Path(__file__).parent / "recent_cases.json"
+RECENT_MAX = 8
+
+def _load_recent() -> dict:
+    if RECENT_CASES_PATH.exists():
+        try:
+            return json.loads(RECENT_CASES_PATH.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001 — file corrupt → reset, không crash bot
+            print(f"recent_cases.json load lỗi ({e}); reset", flush=True)
+    return {}
+
+def _save_recent(data: dict) -> None:
+    try:
+        tmp = RECENT_CASES_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(RECENT_CASES_PATH)
+    except Exception as e:  # noqa: BLE001
+        print(f"recent_cases.json save lỗi: {e}", flush=True)
+
+_RECENT_BY_STAFF: dict = _load_recent()   # str(user_id) -> [{folder_id, applicant, ts}, ...]
+
+def _push_recent(user_id, info: dict) -> None:
+    """Đẩy case `info` lên đầu deque recent của staff (maxlen RECENT_MAX), persist ngay."""
+    uid = str(user_id)
+    folder_id = info.get("folder_id", "")
+    applicant = info.get("applicant", "?")
+    if not folder_id:
+        return
+    arr = [e for e in (_RECENT_BY_STAFF.get(uid) or []) if e.get("folder_id") != folder_id]
+    arr.insert(0, {"folder_id": folder_id, "applicant": applicant, "ts": time.time()})
+    _RECENT_BY_STAFF[uid] = arr[:RECENT_MAX]
+    _save_recent(_RECENT_BY_STAFF)
+
+# Map (chat_id:message_id) → folder_id, để staff reply tin bot cũ → biết case đó là gì.
+# In-process only (mất khi restart); chỉ dùng cho DM bot trả lời câu hỏi chat.
+_BOT_MSG_TO_FOLDER: dict = {}
 
 # ── Parse group title ─────────────────────────────────────────────────────────
 # Phân biệt KH vs Pro bằng chữ "Pro" (case-insensitive) trong title.
@@ -342,6 +386,7 @@ def setup_drive_folder(case_name: str) -> tuple[str, str]:
         get_or_create_folder(f, folder_id, drive_id=SHARED_DRIVE_ID)
     get_or_create_folder(OCR_META_FOLDER, folder_id, drive_id=SHARED_DRIVE_ID)
     get_or_create_folder(OLD_FILE_FOLDER, folder_id, drive_id=SHARED_DRIVE_ID)   # inbox cho hồ sơ cũ
+    get_or_create_folder(DA_DUYET_FOLDER, folder_id, drive_id=SHARED_DRIVE_ID)   # staff review
     link = f"https://drive.google.com/drive/folders/{folder_id}"
     return folder_id, link
 
@@ -627,13 +672,18 @@ async def _setup_case(bot: Bot, reg: dict, pair_key: str,
     # 1. Drive folder
     folder_id, drive_link = setup_drive_folder(case_name)
 
-    # 2. Find responsible staff in KH/customer group.
-    # Do not use DH Pro group for Drive/Sheet permissions.
+    # 2. Find responsible staff — query both KH and Pro group so staff who are
+    # only in the Pro group at setup time are not silently missed.
     all_staff = load_staff()
-    staff_in_group = await get_group_staff(bot, int(kh_chat_id), all_staff)
-    # Directors should always receive case access/sheet updates even when
-    # Telegram cannot detect them in the KH group without admin rights.
-    seen_staff_ids = {s.get("tele_id") for s in staff_in_group if s.get("tele_id")}
+    staff_in_kh  = await get_group_staff(bot, int(kh_chat_id), all_staff)
+    staff_in_pro = await get_group_staff(bot, int(pro_chat_id), all_staff)
+    seen_staff_ids = {s["tele_id"] for s in staff_in_kh if s.get("tele_id")}
+    staff_in_group = list(staff_in_kh)
+    for s in staff_in_pro:
+        if s.get("tele_id") and s["tele_id"] not in seen_staff_ids:
+            staff_in_group.append(s)
+            seen_staff_ids.add(s["tele_id"])
+    # Directors always included regardless of group membership detection.
     for s in all_staff:
         if s.get("role", "").strip().lower() == "director" and s.get("tele_id") and s.get("tele_id") not in seen_staff_ids:
             staff_in_group.append(s)
@@ -721,7 +771,8 @@ ACCEPTED_EXTS = (
 
 
 async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checklist_only: bool = False,
-                            force_rescan: bool = False, sweep_meta: bool = False):
+                            force_rescan: bool = False, sweep_meta: bool = False,
+                            case_folder_id: str = "", applicant: str = ""):
     """Run scan_pipeline.py; return the manifest dict.
 
     Normal mode: process input_path (.zip / dir / file) then run the AI checklist.
@@ -730,6 +781,7 @@ async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checkl
     force_rescan=True: bypass hash-dedup so OCR runs lại — dùng cho /oldfile khi cần
       bot reclassify file cũ với rule mới (P1.3).
     sweep_meta=True: trước khi xử lý, dọn .md/.json lạc khỏi 4 folder khách (P1.4).
+    case_folder_id + applicant: dùng --case-folder-id thay vì --from-registry (DM mode).
 
     Serialized per case (case_key) so one case is never processed concurrently;
     different cases run in parallel up to SCAN_RUN_CONCURRENCY. In normal mode
@@ -751,7 +803,12 @@ async def run_scan_pipeline(input_path, chat_id: str, case_key: str = "", checkl
                 cmd.append("--checklist-only")
             else:
                 cmd.append(str(input_path))
-            cmd += ["--from-registry", str(chat_id), "--manifest", str(man_path)]
+            if case_folder_id:
+                cmd += ["--case-folder-id", case_folder_id,
+                        "--applicant", applicant or "?",
+                        "--manifest", str(man_path)]
+            else:
+                cmd += ["--from-registry", str(chat_id), "--manifest", str(man_path)]
             if force_rescan:
                 cmd.append("--force-rescan")
             if sweep_meta:
@@ -804,8 +861,8 @@ def _a(url: str, text) -> str:
     return f'<a href="{html.escape(str(url), quote=True)}">{txt}</a>' if url else txt
 
 
-def summarize_manifest(m: dict, drive_link: str = "") -> str:
-    """Post-processing summary as Telegram HTML — each filename is a clickable Drive link."""
+def summarize_manifest(m: dict, drive_link: str = "") -> list[str]:
+    """Post-processing summary as Telegram HTML — split into ≤2 messages at folder boundary if too long."""
     c = m.get("counts", {}) or {}
     items = m.get("items", []) or []
     total = m.get("total_input_files", len(items))
@@ -814,67 +871,151 @@ def summarize_manifest(m: dict, drive_link: str = "") -> str:
     dup = c.get("duplicate", 0)
     dup_hash = c.get("duplicate-by-hash", 0)
     failed = c.get("failed", 0)
-    dropped = list(m.get("dropped_files", []) or [])   # P1.2: file đầu vào bị mất
+    dropped = list(m.get("dropped_files", []) or [])
     n_out = m.get("total_output_items", len(items))
     review = [it for it in items if it.get("needs_review")]
-    lines: list[str] = []
-    if failed == 0 and not dropped:
-        lines.append(html.escape(f"✅ Đã xử lý {total} file"))
-    else:
-        lines.append(html.escape(f"⚠️ Đã xử lý {total - failed - len(dropped)}/{total} file — "
-                                 f"{failed} LỖI, {len(dropped)} BỊ MẤT"))
-    # P1.2 — dòng đối chiếu input vs output: staff luôn thấy con số.
-    lines.append(html.escape(f"📥 Nhận: {total} · 📤 Xuất: {n_out} item ({n_out - split_n} file gốc + {split_n} tách)") if split_n else
-                 html.escape(f"📥 Nhận: {total} · 📤 Xuất: {n_out} file"))
-    if dropped:
-        lines.append(html.escape(f"⛔ {len(dropped)} FILE BỊ MẤT (không có trong manifest): ")
-                     + ", ".join(html.escape(nm) for nm in dropped[:20])
-                     + (html.escape(f" … (+{len(dropped)-20} nữa)") if len(dropped) > 20 else "")
-                     + html.escape("  — vui lòng gửi lại cho bot."))
-    if review:
-        lines.append(f"⚠️ <b>{len(review)} file cần kiểm tra thủ công</b> — danh sách bên dưới có icon ⚠️.")
-    if split_n:
-        lines.append(html.escape(f"   (✂ {split_n} file tách từ PDF gộp nhiều loại)"))
-    if dup_hash:
-        lines.append(html.escape(f"   (🔁 {dup_hash} file trùng nội dung — skip upload)"))
-    extra = []
-    if no_ocr: extra.append(f"{no_ocr} file không OCR (cần kiểm tra tên)")
-    if dup:    extra.append(f"{dup} file đã có sẵn")
-    if extra:  lines.append(html.escape("   (" + "; ".join(extra) + ")"))
-    lines.append("")
+
+    # --- Shared helpers ---
     mark = {"uploaded": "•", "uploaded-no-ocr": "▫", "duplicate": "↺",
             "uploaded-split": "✂", "duplicate-by-hash": "🔁", "failed": "✗"}
-    for i, it in enumerate(items, 1):
-        st = it.get("status", "?")
-        if st == "failed":
-            lines.append(f"{i}. ✗ " + html.escape(str(it.get("src_name") or "?"))
-                         + " — LỖI: " + html.escape(str(it.get("error", "?"))))
+    failed_items = [it for it in items if it.get("status") == "failed"]
+    ok_items = [it for it in items if it.get("status") != "failed"]
+    from collections import OrderedDict
+    grouped: dict[str, list] = OrderedDict()
+    for it in ok_items:
+        folder = it.get("folder", "Khac") or "Khac"
+        grouped.setdefault(folder, []).append(it)
+    bottom = {"Personal Docs", "Khac"}
+    order = sorted(grouped.keys(), key=lambda f: (f in bottom, f))
+
+    def _build_header() -> list[str]:
+        h: list[str] = []
+        if failed == 0 and not dropped:
+            h.append(html.escape(f"✅ Đã xử lý {total} file"))
         else:
+            h.append(html.escape(f"⚠️ Đã xử lý {total - failed - len(dropped)}/{total} file — "
+                                 f"{failed} LỖI, {len(dropped)} BỊ MẤT"))
+        new_n = c.get("uploaded", 0) + c.get("uploaded-split", 0) + c.get("uploaded-no-ocr", 0)
+        h.append(html.escape(f"📥 Nhận: {total} · 📄 Kết quả: {n_out} item ({n_out - split_n} file gốc + {split_n} tách) · 🆕 Mới: {new_n}") if split_n else
+                 html.escape(f"📥 Nhận: {total} · 📄 Kết quả: {n_out} file · 🆕 Mới: {new_n}"))
+        if dropped:
+            h.append(html.escape(f"⛔ {len(dropped)} FILE BỊ MẤT: ")
+                     + ", ".join(html.escape(nm) for nm in dropped[:20])
+                     + (f" … (+{len(dropped)-20} nữa)" if len(dropped) > 20 else ""))
+        if review:
+            h.append(f"⚠️ <b>{len(review)} file cần kiểm tra thủ công</b>")
+        extra = []
+        if dup_hash: extra.append(f"{dup_hash} trùng nội dung")
+        if dup:      extra.append(f"{dup} đã có sẵn")
+        if split_n:  extra.append(f"{split_n} tách từ PDF")
+        if no_ocr:   extra.append(f"{no_ocr} không OCR")
+        if extra:    h.append(html.escape("   (" + " · ".join(extra) + ")"))
+        h.append("")
+        return h
+
+    def _render_group(folder: str, f_items: list) -> list[str]:
+        g: list[str] = []
+        n = len(f_items)
+        n_rv = sum(1 for it in f_items if it.get("needs_review"))
+        rv_note = f" · {n_rv} ⚠️" if n_rv else ""
+        g.append(f"📂 <b>{html.escape(folder)}</b> — {n} file{rv_note}")
+        for it in f_items:
+            st = it.get("status", "?")
             name = it.get("new_name") or it.get("src_name") or "?"
             rv_prefix = "⚠️ " if it.get("needs_review") else ""
+            tag = it.get("tag", "")
             suffix = ""
-            if it.get("needs_review") and (it.get("tag") or "").lower() == "khac":
-                suffix = " (không nhận diện được — kiểm tra)"
-            lines.append(f"{i}. {mark.get(st, '•')} {rv_prefix}"
-                         + _a(it.get("drive_link", ""), name) + html.escape(suffix))
-    if review:
-        lines.append("")
-        lines.append("Cần kiểm tra: " + ", ".join(
-            _a(it.get("drive_link", ""), it.get("src_name") or it.get("new_name") or "?") for it in review))
-    if drive_link:
-        lines.append("")
-        lines.append("📁 " + _a(drive_link, "Thư mục hồ sơ trên Drive"))
-    l_main, _ = _checklist_telegram_lines(m)
-    if l_main:
-        lines.append("")
-        lines.append(html.escape(l_main))
-    # Truncate by dropping whole trailing lines so we never cut inside an <a> tag.
+            if it.get("needs_review") and (tag or "").lower() == "khac":
+                suffix = " (không nhận diện được)"
+            g.append(f"  {mark.get(st, '•')} {rv_prefix}"
+                     + _a(it.get("drive_link", ""), name) + html.escape(suffix))
+        g.append("")
+        return g
+
+    def _build_failed() -> list[str]:
+        if not failed_items:
+            return []
+        g: list[str] = ["❌ <b>Lỗi:</b>"]
+        for it in failed_items:
+            g.append(f"  ✗ " + html.escape(str(it.get("src_name") or "?"))
+                     + " — " + html.escape(str(it.get("error", "?"))))
+        g.append("")
+        return g
+
+    def _build_summary() -> list[str]:
+        parts = []
+        for folder in order:
+            n = len(grouped[folder])
+            n_rv = sum(1 for it in grouped[folder] if it.get("needs_review"))
+            rv_flag = " ⚠️" if n_rv else ""
+            parts.append(f"{html.escape(folder)}: {n}{rv_flag}")
+        return ["📊 <b>Tổng folder:</b> " + " · ".join(parts)]
+
+    def _build_footer() -> list[str]:
+        f: list[str] = []
+        if review:
+            f.append("")
+            f.append("⚠️ Cần kiểm tra: " + ", ".join(
+                _a(it.get("drive_link", ""), it.get("src_name") or it.get("new_name") or "?") for it in review))
+        if drive_link:
+            f.append("")
+            f.append("📁 " + _a(drive_link, "Thư mục hồ sơ trên Drive"))
+        l_main, _ = _checklist_telegram_lines(m)
+        if l_main:
+            f.append("")
+            f.append(html.escape(l_main))
+        return f
+
+    header = _build_header()
+    failed_block = _build_failed()
+    footer = _build_footer()
+    summary = _build_summary()
+    groups = [(folder, _render_group(folder, grouped[folder])) for folder in order]
+
+    # Try single message
+    all_lines = header + [ln for _, gl in groups for ln in gl] + failed_block + summary + footer
     LIMIT = 3900
-    if len("\n".join(lines)) > LIMIT:
-        while lines and len("\n".join(lines) + "\n…(rút gọn)") > LIMIT:
-            lines.pop()
-        lines.append("…(rút gọn)")
-    return "\n".join(lines)
+    full = "\n".join(all_lines)
+    if len(full) <= LIMIT:
+        return [full]
+
+    # Need to split at folder boundary. Accumulate groups until hitting 2500 chars (room for part2).
+    part1 = list(header)
+    split_at = 0
+    for idx, (fname, glines) in enumerate(groups):
+        candidate = "\n".join(part1 + glines + ["(còn tiếp…)"])
+        if len(candidate) > LIMIT and idx > 0:
+            split_at = idx
+            break
+        part1.extend(glines)
+        split_at = idx + 1
+
+    if split_at >= len(groups) or split_at == 0:
+        # Can't split cleanly — return truncated single message
+        return [full[:LIMIT - 20] + "\n…(rút gọn)"]
+
+    # Build part2: remaining groups + failed + summary + footer
+    remaining_groups = [ln for _, gl in groups[split_at:] for ln in gl]
+    part2_lines = ["📋 <b>Tiếp theo</b> — " + ", ".join(
+        html.escape(f) for f, _ in groups[split_at:])] + [""] + remaining_groups
+    # Only include failed + summary + footer in part2
+    if failed_items:
+        part2_lines.extend(failed_block)
+    part2_lines.extend(summary)
+    part2_lines.extend(footer)
+
+    # Add continuation note to part1
+    part1_str = "\n".join(part1 + ["📋 <b>Còn tiếp…</b>"])
+    if len(part1_str) > LIMIT:
+        part1_str = part1_str[:LIMIT - 20] + "\n…(rút gọn)"
+
+    return [part1_str, "\n".join(part2_lines)]
+
+
+async def _send_summary(bot, chat_id, parts: list[str], **kwargs):
+    """Send summary parts as separate Telegram messages."""
+    for part in parts:
+        await send_html(bot, int(chat_id), part, **kwargs)
 
 
 # ── Debounce buffer: gom file của một nhóm KH đến gần nhau → một lần scan ─────
@@ -964,6 +1105,13 @@ async def _flush_batch_after(context, chat_id, batch, my_gen: int, delay: float)
     batch.flushing = True
     _PENDING_BATCHES.pop(chat_id, None)         # synchronous, trước mọi await ⇒ file mới mở batch mới
     pro_chat_id = batch.pro_chat_id
+    # Ghi checkpoint trước khi pipeline — nếu bot bị kill, startup retry sẽ dọn
+    _CHECKPOINT_DIR.mkdir(exist_ok=True)
+    _ckpt = _CHECKPOINT_DIR / f"{chat_id}.json"
+    _ckpt.write_text(json.dumps({
+        "chat_id": chat_id, "pro_chat_id": pro_chat_id,
+        "drive_link": batch.drive_link, "created_at": time.time(),
+    }), encoding="utf-8")
     try:
         if batch.workdir.exists():
             _expand_zips_in_dir(batch.workdir)          # giải nén .zip tại chỗ trước khi scan
@@ -971,6 +1119,7 @@ async def _flush_batch_after(context, chat_id, batch, my_gen: int, delay: float)
                  if batch.workdir.exists() else [])
         if not files:
             logger.info(f"debounce flush {chat_id}: no files, nothing to do")
+            _ckpt.unlink(missing_ok=True)
             return
         manifest = await run_scan_pipeline(batch.workdir, chat_id, case_key=batch.folder_id)
         try:  # giấy tờ vừa đổi → chat phải thấy data mới
@@ -979,13 +1128,14 @@ async def _flush_batch_after(context, chat_id, batch, my_gen: int, delay: float)
             pass
         if manifest is None:
             logger.error(f"scan pipeline could not run for batch {chat_id} ({len(files)} file)")
-            return  # stay silent in Telegram; logs have the details
+            return  # stay silent in Telegram; logs have the details (checkpoint persists for retry)
         if not manifest.get("items"):
             await context.bot.send_message(chat_id=int(pro_chat_id),
                                            text="⚠️ Lô file vừa gửi không có gì để xử lý.")
+            _ckpt.unlink(missing_ok=True)
             return
-        await send_html(context.bot, pro_chat_id, summarize_manifest(manifest, batch.drive_link),
-                        disable_web_page_preview=True)
+        await _send_summary(context.bot, pro_chat_id, summarize_manifest(manifest, batch.drive_link),
+                           disable_web_page_preview=True)
         # AI checklist — a short second message confirming "đã thẩm định" + link
         _, ck_detail = _checklist_telegram_lines(manifest)
         if ck_detail:
@@ -999,6 +1149,7 @@ async def _flush_batch_after(context, chat_id, batch, my_gen: int, delay: float)
                     f"split={c.get('uploaded-split',0)} no_ocr={c.get('uploaded-no-ocr',0)} "
                     f"dup={c.get('duplicate',0)} dup_hash={c.get('duplicate-by-hash',0)} "
                     f"failed={c.get('failed',0)}")
+        _ckpt.unlink(missing_ok=True)   # Telegram gửi xong → xóa checkpoint
     except Exception as e:
         logger.error(f"_flush_batch_after {chat_id}: {e}", exc_info=True)
     finally:
@@ -1061,7 +1212,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"debounce ack send failed: {e}")
 
     try:
-        await tg_file.download_to_drive(str(in_path))
+        async with _DOWNLOAD_SEM:
+            await tg_file.download_to_drive(str(in_path))
     except Exception as e:
         logger.error(f"download failed {src_name} ({chat_id}): {e}", exc_info=True)
         # tên vẫn reserve; thiếu file trong dir thì collect_from_dir đơn giản bỏ qua, không sao
@@ -1087,12 +1239,66 @@ async def debug_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"DEBUG update chat={msg.chat.id} title={msg.chat.title!r} text={bool(msg.text)} doc={bool(msg.document)} photo={bool(msg.photo)}")
 
 
-# ── /check — re-run the AI checklist on demand (Pro group only) ───────────────
+# ── /check — re-run the AI checklist on demand (Pro group hoặc DM) ───────────────
 async def on_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return
-    chat_id = str(msg.chat.id)
+    chat = msg.chat
+    chat_id = str(chat.id)
+    user_id = msg.from_user.id if msg.from_user else None
+
+    # ── DM mode ──────────────────────────────────────────────────────────
+    if chat.type == "private":
+        if not user_id or not (staff_by_telegram_id(str(user_id)) or str(user_id) in STAFF_TELE_IDS):
+            return
+        reg = load_registry()
+        my_cases = chatmod.cases_for_staff(reg, user_id)
+        sess = chatmod.dm_session(user_id)
+        folder_id = sess.get("folder")
+        if not folder_id:
+            await context.bot.send_message(chat_id=chat.id,
+                text="Anh chọn hồ sơ nào để đối chiếu?")
+            await _present_case_picker(context.bot, chat.id, user_id, my_cases)
+            return
+        dm_info = next((c for _, c in my_cases if c.get("folder_id") == folder_id), None)
+        if not dm_info:
+            await context.bot.send_message(chat_id=chat.id,
+                text="❌ Không tìm thấy hồ sơ đang chọn. Dùng /case để chọn lại.")
+            return
+        applicant_dm = dm_info.get("applicant", "?")
+        try:
+            await context.bot.send_message(chat_id=chat.id,
+                text=f"⏳ Đang đối chiếu hồ sơ {applicant_dm}…")
+        except Exception:
+            pass
+        try:
+            manifest = await run_scan_pipeline(
+                None, chat_id, case_key=folder_id,
+                checklist_only=True, sweep_meta=True,
+                case_folder_id=folder_id, applicant=applicant_dm,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"/check DM user={user_id}: {e}", exc_info=True)
+            await context.bot.send_message(chat_id=chat.id, text=f"❌ Lỗi khi đối chiếu: {e}")
+            return
+        try:
+            chatmod.invalidate_case_cache(folder_id)
+        except Exception:
+            pass
+        ck = (manifest or {}).get("checklist") or {}
+        if not ck.get("ran"):
+            await context.bot.send_message(chat_id=chat.id,
+                text=f"⚠️ Chưa đối chiếu được: {ck.get('error') or 'không rõ lý do (xem log)'}")
+            return
+        l_main, detail = _checklist_telegram_lines(manifest)
+        if l_main:
+            await context.bot.send_message(chat_id=chat.id, text=l_main, disable_web_page_preview=True)
+        if detail:
+            await send_html(context.bot, chat_id, detail, disable_web_page_preview=True)
+        return
+
+    # ── Pro group mode ────────────────────────────────────────────────────
     info = (load_registry() or {}).get(chat_id) or {}
     if info.get("kind") != "pro":
         return  # ignore /check anywhere that isn't a Pro group
@@ -1137,22 +1343,49 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = update.message
     if not msg:
         return
-    chat_id = str(msg.chat.id)
-    info = (load_registry() or {}).get(chat_id) or {}
-    # Chỉ chạy trong nhóm Pro đã setup case (mirror on_check_command).
-    if info.get("kind") != "pro":
-        return
-    if not info.get("case_setup") or not info.get("folder_id"):
-        try:
-            await context.bot.send_message(chat_id=int(chat_id), text="⚠️ Group này chưa setup case.")
-        except Exception:
-            pass
-        return
-    folder_id = info["folder_id"]
-    applicant = info.get("applicant", "?")
-    drive_link = info.get("drive_link", "")
-    # kh_chat_id KHÔNG bắt buộc — Pro chat_id cũng resolve được case qua group_registry.json
-    # (resolve_from_registry chỉ cần folder_id, có ở cả Pro & KH side khi case_setup=true).
+    chat = msg.chat
+    user_id = msg.from_user.id if msg.from_user else None
+
+    # ── Resolve case: DM vs Pro group ─────────────────────────────────────────
+    _case_folder_id_arg = ""   # set in DM branch → --case-folder-id; empty → --from-registry
+    if chat.type == "private":
+        if not user_id or not (staff_by_telegram_id(str(user_id)) or str(user_id) in STAFF_TELE_IDS):
+            return
+        reg = load_registry()
+        my_cases = chatmod.cases_for_staff(reg, user_id)
+        sess = chatmod.dm_session(user_id)
+        _folder = sess.get("folder")
+        if not _folder:
+            await context.bot.send_message(chat_id=chat.id,
+                text="Anh chọn hồ sơ nào để chạy Old File?")
+            await _present_case_picker(context.bot, chat.id, user_id, my_cases)
+            return
+        _dm_info = next((c for _, c in my_cases if c.get("folder_id") == _folder), None)
+        if not _dm_info:
+            await context.bot.send_message(chat_id=chat.id,
+                text="❌ Không tìm thấy hồ sơ đang chọn. Dùng /case để chọn lại.")
+            return
+        chat_id = str(chat.id)
+        folder_id = _dm_info["folder_id"]
+        applicant = _dm_info.get("applicant", "?")
+        drive_link = _dm_info.get("drive_link", "")
+        _case_folder_id_arg = folder_id
+    else:
+        chat_id = str(chat.id)
+        _info = (load_registry() or {}).get(chat_id) or {}
+        if _info.get("kind") != "pro":
+            return
+        if not _info.get("case_setup") or not _info.get("folder_id"):
+            try:
+                await context.bot.send_message(chat_id=int(chat_id), text="⚠️ Group này chưa setup case.")
+            except Exception:
+                pass
+            return
+        folder_id = _info["folder_id"]
+        applicant = _info.get("applicant", "?")
+        drive_link = _info.get("drive_link", "")
+
+    # ── Shared body: lock + download + pipeline + move ─────────────────────────
 
     # Per-case lock: ngăn 2 lần /oldfile chạy đồng thời cùng case.
     lock = _OLDFILE_LOCKS.setdefault(folder_id, asyncio.Lock())
@@ -1226,7 +1459,9 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # P1.3+P1.4 — /oldfile: force_rescan + sweep_meta để bot reclassify file cũ
             # với rule mới + dọn sidecar lạc trong folder khách trước khi xử lý.
             manifest = await run_scan_pipeline(workdir, chat_id, case_key=folder_id,
-                                                force_rescan=True, sweep_meta=True)
+                                                force_rescan=True, sweep_meta=True,
+                                                case_folder_id=_case_folder_id_arg,
+                                                applicant=applicant if _case_folder_id_arg else "")
             try:
                 chatmod.invalidate_case_cache(folder_id)
             except Exception:
@@ -1243,8 +1478,8 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     text="⚠️ Lô Old File không có gì để xử lý.")
                 return
 
-            await send_html(context.bot, chat_id, summarize_manifest(manifest, drive_link),
-                            disable_web_page_preview=True)
+            await _send_summary(context.bot, chat_id, summarize_manifest(manifest, drive_link),
+                               disable_web_page_preview=True)
             _, ck_detail = _checklist_telegram_lines(manifest)
             if ck_detail:
                 try:
@@ -1254,7 +1489,6 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             # P1.3 — chỉ move file ĐÃ XỬ LÝ THÀNH CÔNG sang _processed. File `failed`
             # và file silent-drop để nguyên trong Old File để staff thấy + retry.
-            # Trước: vòng lặp move tất cả → file lỗi cũng "biến mất" khỏi Old File.
             processed_src_names: set[str] = set()
             for it in manifest.get("items", []) or []:
                 st = it.get("status", "")
@@ -1293,7 +1527,7 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 logger.info(f"/oldfile moved {moved}/{len(downloaded)} file vào _processed (giữ lại {kept} file)")
 
             c = manifest.get("counts", {}) or {}
-            logger.info(f"OLDFILE pro_chat={chat_id} case={applicant!r} "
+            logger.info(f"OLDFILE chat={chat_id} case={applicant!r} "
                         f"N_in={len(downloaded)} uploaded={c.get('uploaded',0)} "
                         f"split={c.get('uploaded-split',0)} no_ocr={c.get('uploaded-no-ocr',0)} "
                         f"dup={c.get('duplicate',0)} dup_hash={c.get('duplicate-by-hash',0)} "
@@ -1387,6 +1621,233 @@ async def _finalize_streaming(bot, chat_id, msg_id: int, final_html: str,
         logger.warning(f"streaming plain edit fail (ignored): {e}")
 
 
+# ── /case picker (DM only) ──────────────────────────────────────────────────
+# Khi staff phụ trách hàng trăm case, sticky session lo 95% câu hỏi liền nhau cùng 1 KH;
+# khi cần đổi case nhanh thì /case → inline button cho 8 case gần đây + nút search.
+async def _staff_my_cases(user_id) -> list:
+    reg = load_registry()
+    return chatmod.cases_for_staff(reg, user_id)
+
+def _build_case_keyboard(cases: list, *, include_search: bool = True,
+                          fallback_for_search: str = "") -> InlineKeyboardMarkup:
+    """`cases` = list[info dict]. Mỗi case 1 nút riêng (text = applicant).
+    callback_data = `pickcase:<folder_id>` (Telegram giới hạn 64 bytes — folder_id Drive < 50 ký tự OK)."""
+    rows = []
+    for info in cases:
+        fid = info.get("folder_id", "")
+        if not fid:
+            continue
+        rows.append([InlineKeyboardButton(
+            text=(info.get("applicant", "?") or "?")[:60],
+            callback_data=f"pickcase:{fid}",
+        )])
+    if include_search:
+        rows.append([InlineKeyboardButton(text="🔍 Tìm KH khác", callback_data="pickcase:search")])
+    return InlineKeyboardMarkup(rows)
+
+def _recent_then_alpha(my_cases: list, user_id) -> list:
+    """Lấy tối đa 8 case: ưu tiên recent của staff, lấp đầy bằng case còn lại theo alphabet applicant."""
+    by_folder = {info.get("folder_id", ""): info for _, info in my_cases if info.get("folder_id")}
+    out: list = []
+    seen: set = set()
+    for entry in (_RECENT_BY_STAFF.get(str(user_id)) or []):
+        fid = entry.get("folder_id", "")
+        if fid in by_folder and fid not in seen:
+            out.append(by_folder[fid])
+            seen.add(fid)
+        if len(out) >= RECENT_MAX:
+            break
+    if len(out) < RECENT_MAX:
+        rest = sorted([info for fid, info in by_folder.items() if fid not in seen],
+                      key=lambda i: (i.get("applicant", "") or "").lower())
+        for info in rest:
+            out.append(info)
+            if len(out) >= RECENT_MAX:
+                break
+    return out
+
+async def _present_case_picker(bot, chat_id: int, user_id, my_cases: list, query: str = "") -> None:
+    """Trả về DM tin nhắn picker. `query` rỗng → recent+alpha; có query → fuzzy match.
+
+    Logic match khi có query:
+      - chatmod._match_case duy nhất 1 hit → pick instant (đã edit message từ caller).
+      - 2-10 conflict → buttons cho mấy case đó.
+      - Không match scoring → substring `_norm(query)` trong `_norm(applicant)` ≤ 10 case → buttons.
+      - >10 → "Quá nhiều kết quả, anh gõ chi tiết hơn".
+    """
+    if not my_cases:
+        await bot.send_message(chat_id=chat_id,
+            text="Bạn chưa được giao hồ sơ nào trong hệ thống. Hãy hỏi trực tiếp trong nhóm Pro.")
+        return
+    if not query.strip():
+        cases = _recent_then_alpha(my_cases, user_id)
+        n = len(my_cases)
+        header = (f"🤖 Anh đang phụ trách {n} hồ sơ. Chạm để chọn, hoặc gõ /case <tên> để tìm:"
+                  if n > RECENT_MAX else f"🤖 Anh đang phụ trách {n} hồ sơ. Chạm để chọn:")
+        await bot.send_message(chat_id=chat_id, text=header, reply_markup=_build_case_keyboard(cases))
+        return
+    info, conflicts = chatmod._match_case(query, my_cases)
+    if info is not None:
+        await _commit_pick(bot, chat_id, user_id, info, ack_text=f"✅ Đã chọn: {info.get('applicant', '?')}")
+        return
+    if conflicts:
+        await bot.send_message(chat_id=chat_id,
+            text=f"Khớp {len(conflicts)} hồ sơ — chạm để chọn:",
+            reply_markup=_build_case_keyboard(conflicts, include_search=False))
+        return
+    # Fuzzy fallback: substring normalize query trên applicant
+    qn = chatmod._norm(query)
+    sub = [info for _, info in my_cases if qn in chatmod._norm(info.get("applicant", "") or "")]
+    if not sub:
+        await bot.send_message(chat_id=chat_id,
+            text=f"Không tìm thấy hồ sơ khớp \"{query}\". Gõ tên KH hoặc /case xem 8 hồ sơ gần đây.")
+        return
+    if len(sub) > 10:
+        await bot.send_message(chat_id=chat_id,
+            text=f"Tìm thấy {len(sub)} hồ sơ khớp — quá nhiều. Anh gõ chi tiết hơn (vd kèm năm sinh).")
+        return
+    await bot.send_message(chat_id=chat_id,
+        text=f"Tìm thấy {len(sub)} hồ sơ — chạm để chọn:",
+        reply_markup=_build_case_keyboard(sub, include_search=False))
+
+async def _commit_pick(bot, chat_id: int, user_id, info: dict, *, ack_text: str | None = None,
+                        edit_message_id: int | None = None) -> None:
+    """Lock case `info` cho phiên DM của user_id, push recent, ack."""
+    sess = chatmod.dm_session(user_id)
+    folder_id = info.get("folder_id", "")
+    if sess.get("folder") != folder_id:
+        sess["folder"] = folder_id
+        sess["history"].clear()
+    sess.pop("awaiting_search", None)
+    _push_recent(user_id, info)
+    text = ack_text or f"✅ Đã chọn: {info.get('applicant', '?')}"
+    if edit_message_id is not None:
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=edit_message_id, text=text)
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"_commit_pick edit fail ({e}); fallback send")
+    try:
+        await bot.send_message(chat_id=chat_id, text=text)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"_commit_pick send fail (ignored): {e}")
+
+async def on_case_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.from_user:
+        return
+    chat = msg.chat
+    user_id = msg.from_user.id
+    if chat.type != "private":
+        try:
+            await context.bot.send_message(chat_id=chat.id, reply_to_message_id=msg.message_id,
+                text="/case dùng trong DM riêng với bot (không phải trong nhóm).")
+        except Exception:
+            pass
+        return
+    if not (staff_by_telegram_id(str(user_id)) or str(user_id) in STAFF_TELE_IDS):
+        return
+    # Args sau "/case"
+    raw = (msg.text or "").strip()
+    parts = raw.split(maxsplit=1)
+    query = parts[1].strip() if len(parts) >= 2 else ""
+    my_cases = await _staff_my_cases(user_id)
+    await _present_case_picker(context.bot, chat.id, user_id, my_cases, query=query)
+
+async def on_syncstaff_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """DM only, director only: sync staff[] cho tất cả Pro cases từ Telegram live."""
+    msg = update.message
+    if not msg or not msg.from_user:
+        return
+    if msg.chat.type != "private":
+        return
+    user_id = str(msg.from_user.id)
+    all_staff = load_staff()
+    caller = next((s for s in all_staff if s.get("tele_id") == user_id), None)
+    if not caller or caller.get("role", "").strip().lower() != "director":
+        await msg.reply_text("⛔ Chỉ director mới dùng được lệnh này.")
+        return
+
+    await msg.reply_text("⏳ Đang sync staff cho tất cả cases...")
+    async with REGISTRY_LOCK:
+        reg = load_registry() or {}
+        added_total = 0
+        cases_updated = 0
+        for chat_id, info in reg.items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("kind") != "pro" or not info.get("case_setup"):
+                continue
+            pro_cid = chat_id
+            kh_cid  = str(info.get("kh_chat_id", ""))
+            current_ids = {str(x) for x in (info.get("staff") or [])}
+            new_ids: list[str] = []
+            for cid in filter(None, [pro_cid, kh_cid]):
+                try:
+                    detected = await get_group_staff(context.bot, int(cid), all_staff)
+                except Exception as _e:
+                    logger.warning(f"syncstaff: get_group_staff({cid}) error: {_e}")
+                    continue
+                for s in detected:
+                    tid = str(s.get("tele_id", ""))
+                    if tid and tid not in current_ids:
+                        new_ids.append(tid)
+                        current_ids.add(tid)
+            if new_ids:
+                merged = list(info.get("staff") or []) + new_ids
+                reg[pro_cid]["staff"] = merged
+                if kh_cid and kh_cid in reg:
+                    reg[kh_cid]["staff"] = merged
+                added_total += len(new_ids)
+                cases_updated += 1
+                logger.info(f"syncstaff: case {info.get('applicant','?')!r} +{len(new_ids)} staff: {new_ids}")
+        save_registry(reg)
+
+    await msg.reply_text(
+        f"✅ Sync xong — {cases_updated} case(s) cập nhật, +{added_total} staff entries mới."
+    )
+
+async def on_pickcase_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.data or not q.from_user:
+        return
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    user_id = q.from_user.id
+    chat_id = q.message.chat.id if q.message else user_id
+    edit_msg_id = q.message.message_id if q.message else None
+    if not (staff_by_telegram_id(str(user_id)) or str(user_id) in STAFF_TELE_IDS):
+        return
+    data = q.data
+    if data == "pickcase:search":
+        sess = chatmod.dm_session(user_id)
+        sess["awaiting_search"] = True
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=edit_msg_id,
+                text="🔍 Gõ tên/keyword KH muốn tìm (vd 'anh99', 'nguyễn thị', '1999')")
+        except Exception:
+            pass
+        return
+    if not data.startswith("pickcase:"):
+        return
+    folder_id = data.split(":", 1)[1]
+    reg = load_registry()
+    my_cases = chatmod.cases_for_staff(reg, user_id)
+    info = next((c for _, c in my_cases if c.get("folder_id") == folder_id), None)
+    if not info:
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=edit_msg_id,
+                text="❌ Hồ sơ không còn trong danh sách phụ trách của anh.")
+        except Exception:
+            pass
+        return
+    await _commit_pick(context.bot, chat_id, user_id, info,
+                        ack_text=f"✅ Đã chọn: {info.get('applicant', '?')}. Hỏi đi.",
+                        edit_message_id=edit_msg_id)
+
+
 async def on_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text or not msg.from_user:
@@ -1408,15 +1869,35 @@ async def on_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reg = load_registry()
             my_cases = chatmod.cases_for_staff(reg, user_id)
             sess = chatmod.dm_session(user_id)
-            info, ask = chatmod.pick_case_for_dm(text, my_cases, sess.get("folder"))
-            if ask:
-                await context.bot.send_message(chat_id=user_id, text=ask)
+            # 1. Đang chờ search query từ nút 🔍 → coi text này là /case <text>.
+            if sess.pop("awaiting_search", False):
+                await _present_case_picker(context.bot, chat.id, user_id, my_cases, query=text)
                 return
-            if not info:
-                return
+            # 2. Reply tin bot cũ → ưu tiên case của tin gốc (zero-friction switch).
+            replied_folder = None
+            if msg.reply_to_message and msg.reply_to_message.message_id:
+                replied_folder = _BOT_MSG_TO_FOLDER.get(f"{chat.id}:{msg.reply_to_message.message_id}")
+            info: dict | None = None
+            if replied_folder:
+                info = next((c for _, c in my_cases if c.get("folder_id") == replied_folder), None)
+            if info is None:
+                info, ask = chatmod.pick_case_for_dm(text, my_cases, sess.get("folder"))
+                if ask:
+                    await context.bot.send_message(chat_id=user_id, text=ask)
+                    return
+                if not info:
+                    # No case match → general Q&A (small talk / câu hỏi visa chung không cần hồ sơ).
+                    ack_msg_id, on_chunk = await _setup_streaming(context.bot, user_id, reply_to_id=None)
+                    async with chatmod.CHAT_SEMAPHORE:
+                        ans = await chatmod.answer_general(sess["history"], text, stream_callback=on_chunk)
+                    sess["history"].append((text, ans))
+                    final_html = chatmod.linkify_answer(ans)
+                    await _finalize_streaming(context.bot, user_id, ack_msg_id, final_html, ans)
+                    return
             if sess.get("folder") != info.get("folder_id"):
                 sess["folder"] = info.get("folder_id")
                 sess["history"].clear()
+            _push_recent(user_id, info)
             applicant = info.get("applicant", "?")
             case_meta = {"applicant": applicant, "visa": info.get("visa", "?"),
                          "agent": _agent_from_title(info.get("raw_title", "")), "folder_id": info.get("folder_id", ""),
@@ -1435,11 +1916,14 @@ async def on_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_html = chatmod.linkify_answer(ans, ctx.get("name_to_link") or {},
                                                  case_meta.get("drive_link", ""))
             await _finalize_streaming(context.bot, user_id, ack_msg_id, final_html, ans)
+            # Đánh dấu tin trả lời này về case nào → staff reply lại tin này = ngầm chọn case.
+            _BOT_MSG_TO_FOLDER[f"{chat.id}:{ack_msg_id}"] = info.get("folder_id", "")
             logger.info(f"CHAT DM user={user_id} case={applicant!r}")
             return
 
         # ── Pro group mode ───────────────────────────────────────────────────
-        info = (load_registry() or {}).get(str(chat.id)) or {}
+        _full_reg = load_registry() or {}
+        info = _full_reg.get(str(chat.id)) or {}
         if info.get("kind") != "pro" or not info.get("case_setup") or not info.get("folder_id"):
             return
         try:
@@ -1459,6 +1943,19 @@ async def on_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                and msg.reply_to_message.from_user.id == bot_id)
         if not (mentioned or is_reply_to_bot):
             return  # chitchat của nhân viên — im lặng
+        # Auto-add staff vào staff[] nếu họ chat trong Pro group nhưng chưa có trong registry
+        # (case setup trước khi họ được thêm vào group, hoặc get_group_staff không detect được)
+        _uid_str = str(user_id)
+        if _uid_str not in [str(x) for x in (info.get("staff") or [])]:
+            try:
+                _full_reg[str(chat.id)].setdefault("staff", []).append(user_id)
+                _kh_cid = str(info.get("kh_chat_id", ""))
+                if _kh_cid and _kh_cid in _full_reg:
+                    _full_reg[_kh_cid].setdefault("staff", []).append(user_id)
+                save_registry(_full_reg)
+                logger.info(f"Auto-added staff {user_id} to case {info.get('applicant','?')!r} (was missing from staff[])")
+            except Exception as _ae:
+                logger.warning(f"Auto-add staff failed (ignored): {_ae}")
         question = text
         if bot_username:
             question = re.sub(rf"@{re.escape(bot_username)}", "", question, flags=re.IGNORECASE).strip()
@@ -1546,15 +2043,19 @@ def _self_test_summary() -> None:
                         "status": "uploaded", "needs_review": True, "drive_link": "https://y"},
                    ]}
     out = summarize_manifest(manifest_ok, drive_link="https://drive/x")
+    assert len(out) == 1, f"expected 1 part, got {len(out)}"
+    out = out[0]
     assert "1 file cần kiểm tra thủ công" in out, out
     assert "⚠️ " in out, out
-    assert "không nhận diện được — kiểm tra" in out, out  # Khac suffix
+    assert "không nhận diện được" in out, out  # Khac suffix
     # Không có needs_review → không có header cảnh báo
     out2 = summarize_manifest({"total_input_files": 1, "counts": {"uploaded": 1},
                                "items": [{"src_name": "c.pdf", "new_name": "CCCD-Foo.pdf",
                                           "tag": "CCCD", "status": "uploaded",
                                           "needs_review": False, "drive_link": "https://z"}]},
                               drive_link="")
+    assert len(out2) == 1, f"expected 1 part, got {len(out2)}"
+    out2 = out2[0]
     assert "cần kiểm tra thủ công" not in out2, out2
     # Fix B — count uploaded-split + duplicate-by-hash trong summary
     out3 = summarize_manifest({"total_input_files": 1,
@@ -1564,6 +2065,8 @@ def _self_test_summary() -> None:
                                           "split_from": "big.pdf", "split_pages": "1-2",
                                           "needs_review": False, "drive_link": "https://a"}]},
                               drive_link="")
+    assert len(out3) == 1, f"expected 1 part, got {len(out3)}"
+    out3 = out3[0]
     assert "tách từ PDF" in out3, out3
     assert "trùng nội dung" in out3, out3
     # Fix A — invalidate_list_cache phải xoá entry, không raise nếu key không có
@@ -1574,11 +2077,55 @@ def _self_test_summary() -> None:
     invalidate_list_cache("nonexistent")  # không raise
 
 
+async def _do_retry_checkpoints(app):
+    """Background: chờ orphan subprocess xong rồi retry các batch bị interrupt khi restart."""
+    await asyncio.sleep(300)   # 5 phút — đủ cho pipeline 32 trang FORCE-PRO hoàn thành
+    if not _CHECKPOINT_DIR.exists():
+        return
+    ckpts = list(_CHECKPOINT_DIR.glob("*.json"))
+    if not ckpts:
+        return
+    logger.info(f"Startup retry: {len(ckpts)} checkpoint(s) pending từ lần restart trước")
+    for ckpt in ckpts:
+        try:
+            meta = json.loads(ckpt.read_text(encoding="utf-8"))
+            if time.time() - meta.get("created_at", 0) < 60:
+                continue          # Quá mới — skip, có thể batch đang chạy bình thường
+            chat_id     = meta["chat_id"]
+            pro_chat_id = meta["pro_chat_id"]
+            drive_link  = meta.get("drive_link", "")
+            logger.info(f"Startup retry: --checklist-only cho case {chat_id}")
+            manifest = await run_scan_pipeline(None, chat_id, checklist_only=True)
+            ckpt.unlink(missing_ok=True)
+            if not manifest or not manifest.get("items"):
+                continue
+            await _send_summary(app.bot, pro_chat_id,
+                               summarize_manifest(manifest, drive_link),
+                               disable_web_page_preview=True)
+            _, ck_detail = _checklist_telegram_lines(manifest)
+            if ck_detail:
+                await send_html(app.bot, pro_chat_id, ck_detail, disable_web_page_preview=True)
+        except Exception as _e:
+            logger.error(f"Startup retry {ckpt.name}: {_e}", exc_info=True)
+
+async def _post_init_retry(application):
+    asyncio.create_task(_do_retry_checkpoints(application))
+
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(16).build()
+    from telegram.request import HTTPXRequest
+    app = (Application.builder()
+           .token(BOT_TOKEN)
+           .request(HTTPXRequest(read_timeout=120, write_timeout=120, connect_timeout=30, pool_timeout=30))
+           .concurrent_updates(16)
+           .post_init(_post_init_retry)
+           .build())
     app.add_handler(ChatMemberHandler(on_bot_join, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CommandHandler("check", on_check_command))
     app.add_handler(CommandHandler("oldfile", on_oldfile_command))
+    app.add_handler(CommandHandler("case", on_case_command))
+    app.add_handler(CommandHandler("syncstaff", on_syncstaff_command))
+    app.add_handler(CallbackQueryHandler(on_pickcase_callback, pattern=r"^pickcase:"))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.TEXT, remember_staff_activity), group=1)
     app.add_handler(MessageHandler(filters.ALL, debug_all), group=1)
