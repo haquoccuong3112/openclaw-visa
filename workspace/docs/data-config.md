@@ -2,6 +2,8 @@
 
 All files live under `workspace/scan-ho-so/data/`. Loaded and validated at startup by `lib/rule_loader.py`; changes take effect after `sudo systemctl restart donghanhbot`.
 
+> See also: [`docs/pipeline-diagram.md`](pipeline-diagram.md) — how these configs flow through the pipeline at runtime.
+
 ---
 
 ## rules.yaml — Validation Rules v1.1
