@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
-"""vision_check — cross-photo comparison qua gemini-2.5-pro multi-image.
+"""vision_check — cross-photo comparison via AWS Rekognition CompareFaces.
 
 Mức 3 sprint: sau khi process_one loop xong, tìm các cặp giấy có ảnh chân dung
-(Anh the × Passport / GPLX / HC) → gọi Gemini với 2 ảnh + prompt vision compare
-→ trả {same_person, age_diff_months, phau_thuat_signs, anomalies}.
+(Anh the × Passport / GPLX / CCCD) → gọi AWS Rekognition CompareFaces
+→ trả {same_person, confidence, age_diff_months, phau_thuat_signs, anomalies, rekognition_similarity}.
 
-Result inject vào profile._vision_compare làm ground-truth cho LLM tầng 2
-(pattern giống lib/checklist.py::build_dia_gioi).
+Result inject vào profile._vision_compare làm ground-truth cho LLM tầng 2.
 
 Cover rule:
-  - 1.2: phau_thuat_signs non-empty → 🔴 reject
   - 8.3: same_person AND age_diff_months > 6 → 🟡 warn
+  - Note: phau_thuat_signs luôn [] — Rekognition không phát hiện phẫu thuật thẩm mỹ.
+    Rule 1.2 (phau_thuat → 🔴 reject) cần kiểm tra thủ công.
 
 Constraints:
   - MAX_PAIRS_PER_CASE = 3 — tránh cost spike
-  - Cache theo SHA-1 cặp (file_a_hash + file_b_hash)
-  - Skip nếu thiếu Anh thẻ
+  - Cache theo SHA-1 cặp (file_id_a + file_id_b)
+  - Skip nếu thiếu Anh thẻ hoặc thiếu AWS_ACCESS_KEY_ID
+
+Env vars:
+  AWS_ACCESS_KEY_ID       — required
+  AWS_SECRET_ACCESS_KEY   — required
+  AWS_REGION              — region (default: us-east-1)
+  VISION_MAX_PAIRS        — max pairs per case (default: 3)
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import io
 import json
@@ -28,47 +33,10 @@ import re
 import tempfile
 from pathlib import Path
 
-import httpx
-
-VISION_MODEL = os.environ.get("VISION_COMPARE_MODEL", "google/gemini-2.5-pro")
 MAX_PAIRS_PER_CASE = int(os.environ.get("VISION_MAX_PAIRS", "3"))
 
 # Loại giấy có ảnh chân dung — dùng để pair với Anh thẻ
 DOCS_WITH_PORTRAIT = ("Passport", "GPLX", "CCCD")
-
-# Schema strict cho response (OpenRouter json_schema)
-_RESPONSE_SCHEMA = {
-    "name": "vision_compare",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "same_person":     {"type": "boolean"},
-            "confidence":      {"type": "string", "enum": ["high", "medium", "low"]},
-            "age_diff_months": {"type": ["integer", "null"]},
-            "phau_thuat_signs": {"type": "array", "items": {"type": "string"}},
-            "anomalies":       {"type": "array", "items": {"type": "string"}},
-            "ly_do":           {"type": "string"},
-        },
-        "required": ["same_person", "confidence", "phau_thuat_signs", "anomalies"],
-        "additionalProperties": True,
-    },
-}
-
-
-def _file_to_b64(path_or_bytes) -> str:
-    """Read file bytes (path | bytes) → base64."""
-    if isinstance(path_or_bytes, (bytes, bytearray)):
-        data = bytes(path_or_bytes)
-    else:
-        data = Path(path_or_bytes).read_bytes()
-    return base64.b64encode(data).decode()
-
-
-def _detect_mime(path: Path) -> str:
-    ext = path.suffix.lower()
-    return {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".png": "image/png"}.get(ext, "application/octet-stream")
 
 
 def _pair_hash(a_bytes: bytes, b_bytes: bytes) -> str:
@@ -80,87 +48,145 @@ def _pair_hash(a_bytes: bytes, b_bytes: bytes) -> str:
     return h.hexdigest()
 
 
-def compare_portraits(anh_the_path: Path, doc_path: Path, doc_type: str,
-                       model: str | None = None) -> dict | None:
-    """So sánh ảnh chân dung trên 2 file (Anh thẻ vs doc_type).
-
-    Trả dict structured. None nếu lỗi không recover được."""
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        return None
+def _pdf_to_jpeg(pdf_bytes: bytes) -> bytes | None:
+    """Rasterize PDF page 0 → JPEG bytes via pypdfium2. Returns None on error."""
     try:
-        anh_the_b64 = _file_to_b64(anh_the_path)
-        anh_the_mime = _detect_mime(anh_the_path)
-        doc_b64 = _file_to_b64(doc_path)
-        doc_mime = _detect_mime(doc_path)
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(pdf_bytes)
+        if len(doc) == 0:
+            return None
+        page = doc[0]
+        bitmap = page.render(scale=150 / 72)  # 150 DPI
+        pil_image = bitmap.to_pil()
+        buf = io.BytesIO()
+        pil_image.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
     except Exception as e:  # noqa: BLE001
-        print(f"vision_check: read file lỗi: {type(e).__name__}: {e}", flush=True)
+        print(f"vision_check: _pdf_to_jpeg lỗi: {type(e).__name__}: {e}", flush=True)
         return None
 
-    prompt = (
-        "Bạn nhận 2 file kèm bên dưới — đều có ảnh chân dung của người làm hồ sơ visa.\n"
-        f"FILE 1: Ảnh thẻ chân dung độc lập (5x7 phông trắng hoặc tương tự).\n"
-        f"FILE 2: {doc_type} (giấy chính thức có in ảnh chân dung của KH ở 1 trang).\n\n"
-        "Nhiệm vụ — trả JSON 1 dòng (không markdown, không giải thích ngoài JSON):\n"
-        "{\n"
-        '  "same_person": true|false  (có phải CÙNG MỘT người trên 2 ảnh không),\n'
-        '  "confidence":  "high"|"medium"|"low"  (độ chắc chắn),\n'
-        '  "age_diff_months": <số nguyên — ƯỚC LƯỢNG cách nhau bao nhiêu tháng dựa trên visual age (tóc/da/khuôn mặt); null nếu không ước lượng được>,\n'
-        '  "phau_thuat_signs": ["mũi","mí mắt","cằm",...]  (DẤU HIỆU phẫu thuật thẩm mỹ rõ — chỉ ghi nếu THẤY KHÁC BIỆT cấu trúc khuôn mặt giữa 2 ảnh không giải thích được bằng tuổi/cân nặng; rỗng nếu không thấy),\n'
-        '  "anomalies": [...]  (bất thường khác — vd ảnh fake, photoshop nặng, ghép mặt; rỗng nếu không),\n'
-        '  "ly_do": "<1 câu giải thích kết luận>"\n'
-        "}\n\n"
-        "QUAN TRỌNG:\n"
-        "- Không tự ý gắn `phau_thuat_signs` cho thay đổi tự nhiên (gầy/béo, đeo kính, makeup khác).\n"
-        "  CHỈ gắn khi cấu trúc xương/đường nét khuôn mặt RÕ RÀNG khác.\n"
-        "- `same_person`=false nếu nghi 2 người khác — đây là red flag nghiêm trọng cho hồ sơ.\n"
-        "- Nếu file 2 là PDF nhiều trang, tìm trang có ảnh chân dung (trang bio-data của HC, mặt trước GPLX/CCCD).\n"
-        "- `confidence=low` nếu ảnh mờ/quá nhỏ/không nhìn rõ mặt."
-    )
 
-    payload = {
-        "model": model or VISION_MODEL,
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "file", "file": {"filename": Path(anh_the_path).name,
-                                       "file_data": f"data:{anh_the_mime};base64,{anh_the_b64}"}},
-            {"type": "file", "file": {"filename": Path(doc_path).name,
-                                       "file_data": f"data:{doc_mime};base64,{doc_b64}"}},
-        ]}],
-        "temperature": 0.1,
-        "response_format": {"type": "json_schema", "json_schema": _RESPONSE_SCHEMA},
+def _to_image_bytes(file_bytes: bytes) -> bytes | None:
+    """Convert file bytes to JPEG if PDF; pass through if already image."""
+    if file_bytes[:4] == b"%PDF":
+        return _pdf_to_jpeg(file_bytes)
+    return file_bytes
+
+
+def _rekognition_compare(source_bytes: bytes, target_bytes: bytes) -> dict:
+    """AWS Rekognition CompareFaces + DetectFaces → normalized result dict.
+
+    Similarity thresholds:
+      ≥ 95 → same_person=True,  confidence=high
+      ≥ 80 → same_person=True,  confidence=medium
+      ≥ 60 → same_person=True,  confidence=low
+      ≥ 40 → same_person=False, confidence=medium
+      <  40 → same_person=False, confidence=high
+    """
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    region = (os.environ.get("AWS_REGION")
+              or os.environ.get("AWS_DEFAULT_REGION")
+              or "us-east-1")
+    client = boto3.client("rekognition", region_name=region)
+
+    # Step 1: Compare faces
+    try:
+        resp = client.compare_faces(
+            SourceImage={"Bytes": source_bytes},
+            TargetImage={"Bytes": target_bytes},
+            SimilarityThreshold=50.0,
+            QualityFilter="AUTO",
+        )
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Rekognition compare_faces lỗi: {e}") from e
+
+    matches = resp.get("FaceMatches", [])
+    similarity = float(matches[0]["Similarity"]) if matches else 0.0
+
+    if similarity >= 95:
+        same_person, confidence = True, "high"
+    elif similarity >= 80:
+        same_person, confidence = True, "medium"
+    elif similarity >= 60:
+        same_person, confidence = True, "low"
+    elif similarity >= 40:
+        same_person, confidence = False, "medium"
+    else:
+        same_person, confidence = False, "high"
+
+    # Step 2: Age estimation from both images (best-effort)
+    age_diff_months: int | None = None
+    try:
+        src_faces = client.detect_faces(Image={"Bytes": source_bytes}, Attributes=["ALL"])
+        tgt_faces = client.detect_faces(Image={"Bytes": target_bytes}, Attributes=["ALL"])
+        if src_faces["FaceDetails"] and tgt_faces["FaceDetails"]:
+            src_ar = src_faces["FaceDetails"][0]["AgeRange"]
+            tgt_ar = tgt_faces["FaceDetails"][0]["AgeRange"]
+            src_age = (src_ar["Low"] + src_ar["High"]) / 2
+            tgt_age = (tgt_ar["Low"] + tgt_ar["High"]) / 2
+            age_diff_months = int(abs(src_age - tgt_age) * 12)
+    except Exception:  # noqa: BLE001
+        pass
+
+    anomalies: list[str] = []
+    if not matches:
+        anomalies.append("Không tìm thấy khuôn mặt khớp")
+    if resp.get("SourceImageFace") is None:
+        anomalies.append("Không phát hiện khuôn mặt trong ảnh thẻ")
+
+    age_note = f", age_diff≈{age_diff_months // 12}yr" if age_diff_months else ""
+    ly_do = f"Rekognition similarity={similarity:.1f}%, same_person={same_person}{age_note}"
+
+    return {
+        "same_person": same_person,
+        "confidence": confidence,
+        "age_diff_months": age_diff_months,
+        "phau_thuat_signs": [],   # Rekognition không phát hiện phẫu thuật thẩm mỹ
+        "anomalies": anomalies,
+        "ly_do": ly_do,
+        "rekognition_similarity": similarity,
     }
 
-    try:
-        with httpx.Client(timeout=120) as client:
-            resp = client.post("https://openrouter.ai/api/v1/chat/completions",
-                               headers={"Authorization": f"Bearer {api_key}"}, json=payload)
-            if resp.status_code >= 400:
-                payload["response_format"] = {"type": "json_object"}
-                resp = client.post("https://openrouter.ai/api/v1/chat/completions",
-                                   headers={"Authorization": f"Bearer {api_key}"}, json=payload)
-            if resp.status_code >= 400:
-                payload.pop("response_format", None)
-                resp = client.post("https://openrouter.ai/api/v1/chat/completions",
-                                   headers={"Authorization": f"Bearer {api_key}"}, json=payload)
-        resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"].strip()
-        text = re.sub(r"^```[a-z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text)
-        result = json.loads(text)
-        if not isinstance(result, dict):
-            return None
-        # Normalize fields
-        result.setdefault("same_person", False)
-        result.setdefault("confidence", "low")
-        result.setdefault("age_diff_months", None)
-        result.setdefault("phau_thuat_signs", [])
-        result.setdefault("anomalies", [])
-        return result
-    except Exception as e:  # noqa: BLE001
-        print(f"vision_check: compare lỗi ({Path(anh_the_path).name} vs {Path(doc_path).name}): "
-              f"{type(e).__name__}: {e}", flush=True)
+
+def compare_portraits(anh_the_path: Path, doc_path: Path, doc_type: str,
+                       model: str | None = None) -> dict | None:
+    """So sánh ảnh chân dung trên 2 file (Anh thẻ vs doc_type) via AWS Rekognition.
+
+    `model` parameter nhận nhưng bỏ qua — Rekognition không chọn model.
+    Trả dict structured. None nếu lỗi không recover được."""
+    if not os.environ.get("AWS_ACCESS_KEY_ID", ""):
+        print("vision_check: thiếu AWS_ACCESS_KEY_ID — bỏ qua vision compare", flush=True)
         return None
+
+    try:
+        raw_a = Path(anh_the_path).read_bytes()
+        raw_b = Path(doc_path).read_bytes()
+    except Exception as e:  # noqa: BLE001
+        print(f"vision_check: đọc file lỗi: {type(e).__name__}: {e}", flush=True)
+        return None
+
+    img_a = _to_image_bytes(raw_a)
+    img_b = _to_image_bytes(raw_b)
+    if img_a is None or img_b is None:
+        print(f"vision_check: convert ảnh thất bại ({Path(anh_the_path).name}, "
+              f"{Path(doc_path).name})", flush=True)
+        return None
+
+    try:
+        result = _rekognition_compare(img_a, img_b)
+    except Exception as e:  # noqa: BLE001
+        print(f"vision_check: Rekognition lỗi ({Path(anh_the_path).name} vs "
+              f"{Path(doc_path).name}): {type(e).__name__}: {e}", flush=True)
+        return None
+
+    result.setdefault("same_person", False)
+    result.setdefault("confidence", "low")
+    result.setdefault("age_diff_months", None)
+    result.setdefault("phau_thuat_signs", [])
+    result.setdefault("anomalies", [])
+    return result
 
 
 def find_compare_pairs(dataset: list[dict], download_fn=None) -> list[tuple[dict, dict]]:
@@ -173,9 +199,7 @@ def find_compare_pairs(dataset: list[dict], download_fn=None) -> list[tuple[dict
     portrait_items = [d for d in dataset if (d.get("tag") or d.get("loai")) in DOCS_WITH_PORTRAIT]
     if not anh_the_items or not portrait_items:
         return []
-    # Anh thẻ chính = file đầu tiên (caller có thể sort theo confidence/freshness sau)
     main_anh_the = anh_the_items[0]
-    # Ưu tiên Passport > GPLX > CCCD
     priority = {"Passport": 0, "GPLX": 1, "CCCD": 2}
     portrait_items.sort(key=lambda d: priority.get(d.get("tag") or d.get("loai"), 99))
     pairs: list[tuple[dict, dict]] = []
@@ -240,12 +264,7 @@ def compare_pairs_for_case(case_folder_id: str, dataset: list[dict],
                             drive_id: str | None = None) -> list[dict]:
     """Case-level vision compare — download files từ Drive cho mọi cặp (Anh thẻ × portrait doc).
     Cache result trong sidecar `_vision_compare.json` ở `_Bot OCR & Metadata` để /check re-run
-    không tốn token. Trả list[{file_a, file_b, result}].
-
-    Khi nào dùng:
-      - scan_pipeline.py sau process_one (batch mode): item.local_path đã sẵn → có thể truyền
-        trực tiếp evaluate_pairs(), HOẶC gọi function này để bot dùng cache nếu đã có.
-      - checklist.py run_and_write (/check mode): không có local_path → bắt buộc dùng function này.
+    không tốn tiền. Trả list[{file_a, file_b, result}].
     """
     try:
         try:
@@ -260,7 +279,7 @@ def compare_pairs_for_case(case_folder_id: str, dataset: list[dict],
         print(f"vision_check: drive_helpers import lỗi: {e}", flush=True)
         return []
 
-    # 1) Skip nếu không có Anh thẻ
+    # 1) Skip nếu không có Anh thẻ hoặc doc có ảnh
     has_anh_the = any((d.get("loai") or d.get("tag")) == "Anh the" for d in dataset)
     has_portrait = any((d.get("loai") or d.get("tag")) in DOCS_WITH_PORTRAIT for d in dataset)
     if not (has_anh_the and has_portrait):
@@ -270,7 +289,7 @@ def compare_pairs_for_case(case_folder_id: str, dataset: list[dict],
     META_FOLDER = "_Bot OCR & Metadata"
     SIDECAR_NAME = "_vision_compare.json"
     cached: list[dict] = []
-    cache_index: dict[str, dict] = {}   # pair_hash → result
+    cache_index: dict[str, dict] = {}
     try:
         meta_id = get_or_create_folder(META_FOLDER, case_folder_id, drive_id=drive_id)
         existing_id = find_file_by_name(SIDECAR_NAME, meta_id, drive_id=drive_id,
@@ -285,7 +304,7 @@ def compare_pairs_for_case(case_folder_id: str, dataset: list[dict],
     except Exception as e:  # noqa: BLE001
         print(f"vision_check: cache read lỗi (ignored): {type(e).__name__}: {e}", flush=True)
 
-    # 3) Xây danh sách pair (max MAX_PAIRS_PER_CASE)
+    # 3) Xây danh sách pair
     anh_the_items = [d for d in dataset if (d.get("loai") or d.get("tag")) == "Anh the"]
     portrait_items = [d for d in dataset if (d.get("loai") or d.get("tag")) in DOCS_WITH_PORTRAIT]
     if not anh_the_items or not portrait_items:
@@ -303,7 +322,6 @@ def compare_pairs_for_case(case_folder_id: str, dataset: list[dict],
         b_fid = _file_id_from_link(b_link)
         if not a_fid or not b_fid:
             continue
-        # Pair hash dựa trên FILE_ID (rẻ — không cần download nếu cache hit)
         ph = hashlib.sha1(f"{a_fid}::{b_fid}".encode()).hexdigest()
         if ph in cache_index:
             out.append({**cache_index[ph], "cached": True})
@@ -315,9 +333,7 @@ def compare_pairs_for_case(case_folder_id: str, dataset: list[dict],
         except Exception as e:  # noqa: BLE001
             print(f"vision_check: download pair lỗi: {type(e).__name__}: {e}", flush=True)
             continue
-        # Write to temp files for compare_portraits
         try:
-            import tempfile
             a_ten = main_anh_the.get("ten") or "anh_the.jpg"
             b_ten = doc.get("ten") or "doc.pdf"
             with tempfile.NamedTemporaryFile(suffix="-" + Path(a_ten).suffix, delete=False) as af:
@@ -346,14 +362,13 @@ def compare_pairs_for_case(case_folder_id: str, dataset: list[dict],
             "cached": False,
         })
 
-    # 4) Persist updated cache (giữ entry cũ + thêm mới)
+    # 4) Persist updated cache
     if out and n_calls > 0:
         try:
             merged = list(cache_index.values())
             new_hashes = {x["pair_hash"] for x in out if x.get("pair_hash")}
             merged = [m for m in merged if m.get("pair_hash") not in new_hashes]
             merged.extend([x for x in out if x.get("pair_hash") and not x.get("cached")])
-            import tempfile
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
                                               encoding="utf-8") as fh:
                 json.dump(merged, fh, ensure_ascii=False, indent=2)
@@ -381,32 +396,29 @@ if __name__ == "__main__":
     h3 = _pair_hash(b"def", b"abc")
     assert h1 == h2 and h1 != h3, "pair_hash phải deterministic + order-sensitive"
 
+    # _to_image_bytes: non-PDF passthrough
+    fake_jpg = b"\xff\xd8\xff" + b"\x00" * 10
+    assert _to_image_bytes(fake_jpg) is fake_jpg
+
     # find_compare_pairs
     dataset = [
         {"tag": "Anh the", "ten": "Anh the-A.jpg", "local_path": "/tmp/a.jpg"},
         {"tag": "Passport", "ten": "Passport-A.pdf", "local_path": "/tmp/p.pdf"},
         {"tag": "GPLX", "ten": "GPLX-A.jpg", "local_path": "/tmp/g.jpg"},
         {"tag": "CCCD", "ten": "CCCD-A.pdf", "local_path": "/tmp/c.pdf"},
-        {"tag": "Sao ke", "ten": "Sao ke-A.pdf", "local_path": "/tmp/s.pdf"},   # KHÔNG cặp
+        {"tag": "Sao ke", "ten": "Sao ke-A.pdf", "local_path": "/tmp/s.pdf"},
     ]
     pairs = find_compare_pairs(dataset)
-    assert len(pairs) == 3, f"phải có 3 cặp (cap), got {len(pairs)}: {pairs}"
-    # Ưu tiên Passport > GPLX > CCCD
-    assert pairs[0][1]["tag"] == "Passport", pairs[0]
-    assert pairs[1][1]["tag"] == "GPLX", pairs[1]
-    assert pairs[2][1]["tag"] == "CCCD", pairs[2]
+    assert len(pairs) == 3, f"phải có 3 cặp (cap), got {len(pairs)}"
+    assert pairs[0][1]["tag"] == "Passport"
+    assert pairs[1][1]["tag"] == "GPLX"
+    assert pairs[2][1]["tag"] == "CCCD"
 
-    # Không có Anh thẻ → 0 cặp
-    no_anh = [{"tag": "Passport", "local_path": "/tmp/p"}]
-    assert find_compare_pairs(no_anh) == []
+    assert find_compare_pairs([{"tag": "Passport", "local_path": "/tmp/p"}]) == []
+    assert find_compare_pairs([{"tag": "Anh the", "local_path": "/tmp/a"},
+                                {"tag": "Sao ke", "local_path": "/tmp/s"}]) == []
 
-    # Không có doc có ảnh → 0 cặp
-    no_portrait = [{"tag": "Anh the", "local_path": "/tmp/a"}, {"tag": "Sao ke", "local_path": "/tmp/s"}]
-    assert find_compare_pairs(no_portrait) == []
-
-    # Module sanity
     assert callable(compare_portraits)
     assert callable(evaluate_pairs)
-    assert VISION_MODEL.startswith("google/")
     assert MAX_PAIRS_PER_CASE >= 1
-    print(f"vision_check OK | model={VISION_MODEL} | max_pairs={MAX_PAIRS_PER_CASE}")
+    print(f"vision_check OK (AWS Rekognition) | max_pairs={MAX_PAIRS_PER_CASE}")

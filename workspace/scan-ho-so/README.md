@@ -40,11 +40,12 @@ Google Drive folders and runs an AI cross-check ("thẩm định"). It runs as t
     `detect_deterministic_errors(rules, dataset)` chạy NGOÀI LLM phát hiện ngay các lỗi rõ ràng (sổ đỏ
     thế chấp, LLTP hết hạn, NH cấm…, Mức 1 vision: mặt mộc / trang sức / xăm / tóc tối / phông trắng / vân tay CCCD).
     Helpers: `years_until/months_since/days_since/contains/any_in_text`.
-  - `vision_check.py` ⭐ — Mức 3 cross-photo comparison qua `gemini-2.5-pro` multi-image.
-    `compare_portraits(anh_the, doc, doc_type)` so 2 ảnh chân dung → trả `{same_person, confidence,
-    age_diff_months, phau_thuat_signs, anomalies}`. `find_compare_pairs(dataset)` tìm tối đa 3 cặp
-    (Anh thẻ × Passport > GPLX > CCCD). Cache SHA-1. Result inject vào `eval_input._vision_compare`
-    làm ground-truth cho LLM tầng 2 (pattern giống `_dia_gioi`).
+  - `vision_check.py` ⭐ — Mức 3 cross-photo comparison qua **AWS Rekognition** (`CompareFaces` +
+    `DetectFaces`). `compare_portraits(anh_the, doc, doc_type)` so 2 ảnh chân dung → trả `{same_person,
+    confidence, age_diff_months, phau_thuat_signs, anomalies, rekognition_similarity}`. PDF đầu vào
+    tự rasterize → JPEG (pypdfium2). `phau_thuat_signs` luôn `[]` (Rekognition không phát hiện phẫu thuật
+    — cần review thủ công). `find_compare_pairs(dataset)` tìm tối đa 3 cặp (Anh thẻ × Passport > GPLX >
+    CCCD). Cache SHA-1. Result inject vào `eval_input._vision_compare` làm ground-truth cho LLM tầng 2.
   - `sop_naming.py` — doc-type classification + the SOP filename builder (`<Tag>[ relation][ idx]-<Subject>[_ENG].ext`).
     `DOC_TYPE_PATTERNS` + `FILENAME_HINTS` + `RELATION_MAP` giờ derive từ `data/*.yaml` lúc module-import.
   - `checklist.py` — the AI thẩm định. **`run_from_md_contents()`**: used by fresh pipeline runs —

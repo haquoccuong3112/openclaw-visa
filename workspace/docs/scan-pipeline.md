@@ -12,7 +12,10 @@ Loaded from `scan-ocr.env` in the workspace parent directory.
 |----------|---------|---------|
 | `SHARED_DRIVE_ID` | `0AIYOQpLqtMPvUk9PVA` | Google Shared Drive root |
 | `OPENAI_API_KEY` | — | OpenAI API key (GPT vision classify + checklist) |
-| `OPENROUTER_API_KEY` | — | OpenRouter fallback (Gemini vision compare, checklist fallback) |
+| `OPENROUTER_API_KEY` | — | OpenRouter fallback (checklist fallback) |
+| `AWS_ACCESS_KEY_ID` | — | AWS credentials for Rekognition face compare |
+| `AWS_SECRET_ACCESS_KEY` | — | AWS credentials for Rekognition face compare |
+| `AWS_REGION` | `us-east-1` | AWS region for Rekognition |
 | `GOOGLE_APPLICATION_CREDENTIALS` | — | Path to service account JSON |
 | `GOOGLE_DOCUMENTAI_PROCESSOR_ID` | — | Document AI processor ID |
 | `GOOGLE_DOCUMENTAI_PROJECT_ID` | — | Document AI GCP project |
@@ -188,11 +191,17 @@ Drive client is not thread-safe — this phase runs sequentially.
 
 ### Step 7 — Vision Compare *(skipped if `--no-checklist`)*
 
-**Library:** `lib.vision_check` (Gemini 2.5 Pro multi-image via OpenRouter)
+**Library:** `lib.vision_check` (AWS Rekognition `CompareFaces` + `DetectFaces`)
 
 - `find_compare_pairs(dataset)`: find Ảnh thẻ × Passport / GPLX / CCCD pairs (max 3)
 - SHA-1 cache: skip pairs already compared
-- `compare_portraits()` → `{same_person, confidence, age_diff_months, phau_thuat_signs, anomalies}`
+- PDF inputs auto-converted to JPEG (pypdfium2 page 0) before sending to Rekognition
+- `compare_portraits()` → `{same_person, confidence, age_diff_months, phau_thuat_signs, anomalies, rekognition_similarity}`
+  - `similarity ≥ 95` → `same_person=True, confidence=high`
+  - `similarity ≥ 80` → `same_person=True, confidence=medium`
+  - `similarity ≥ 60` → `same_person=True, confidence=low`
+  - `similarity < 60` → `same_person=False`
+  - `phau_thuat_signs` always `[]` — Rekognition không phát hiện phẫu thuật (cần review thủ công)
 - Results stored in manifest `vision_compare[]` — injected as ground-truth into checklist Stage 2
 
 ---
@@ -326,7 +335,8 @@ Makes reruns idempotent: same file bytes → same Drive file, no double-upload.
 | `lib.rule_loader` | local | Load `doc_types.yaml`, `rules.yaml`, `relations.yaml`; generate prompts |
 | `lib.rule_engine` | local | Deterministic pre-checks before checklist LLM |
 | `lib.checklist` | local | `run_from_md_contents()` (fresh) + `run_and_write()` (/check re-run) |
-| `lib.vision_check` | local | Gemini multi-image portrait comparison |
+| `lib.vision_check` | local | AWS Rekognition portrait comparison (`CompareFaces` + `DetectFaces`) |
+| `boto3` | pip | AWS SDK — Rekognition client |
 | `lib.diadia` | local | Offline Vietnamese admin-boundary lookup (used in checklist) |
 | `httpx` | pip | HTTP calls to OpenAI API |
 | `pypdfium2` | pip | Rasterize PDF page 0 → JPEG for GPT vision |
