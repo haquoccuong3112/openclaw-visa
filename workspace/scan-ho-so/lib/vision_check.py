@@ -67,13 +67,47 @@ def _pdf_to_jpeg(pdf_bytes: bytes) -> bytes | None:
 
 
 def _to_image_bytes(file_bytes: bytes) -> bytes | None:
-    """Convert file bytes to JPEG if PDF; pass through if already image."""
+    """Convert file bytes to JPEG if PDF; pass through if already image. No face detection."""
     if file_bytes[:4] == b"%PDF":
         return _pdf_to_jpeg(file_bytes)
     return file_bytes
 
 
-def _rekognition_compare(source_bytes: bytes, target_bytes: bytes) -> dict:
+def _pdf_find_face_page(pdf_bytes: bytes, client, max_pages: int = 5) -> bytes | None:
+    """Rasterize PDF pages 0..max_pages-1, return JPEG of first page where Rekognition
+    detects a face. Falls back to page 0 JPEG if no face found on any scanned page."""
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(pdf_bytes)
+        n = min(len(doc), max_pages)
+        if n == 0:
+            return None
+        first_page_jpeg: bytes | None = None
+        for i in range(n):
+            page = doc[i]
+            bitmap = page.render(scale=150 / 72)  # 150 DPI
+            pil_img = bitmap.to_pil()
+            buf = io.BytesIO()
+            pil_img.save(buf, format="JPEG", quality=85)
+            jpeg = buf.getvalue()
+            if first_page_jpeg is None:
+                first_page_jpeg = jpeg
+            try:
+                resp = client.detect_faces(Image={"Bytes": jpeg}, Attributes=["DEFAULT"])
+                if resp.get("FaceDetails"):
+                    if i > 0:
+                        print(f"vision_check: khuôn mặt ở trang {i} (bỏ qua trang 0)", flush=True)
+                    return jpeg
+            except Exception:  # noqa: BLE001
+                pass
+        print("vision_check: không tìm thấy khuôn mặt trong PDF, dùng trang 0", flush=True)
+        return first_page_jpeg
+    except Exception as e:  # noqa: BLE001
+        print(f"vision_check: _pdf_find_face_page lỗi: {type(e).__name__}: {e}", flush=True)
+        return None
+
+
+def _rekognition_compare(source_bytes: bytes, target_bytes: bytes, client) -> dict:
     """AWS Rekognition CompareFaces + DetectFaces → normalized result dict.
 
     Similarity thresholds:
@@ -83,13 +117,7 @@ def _rekognition_compare(source_bytes: bytes, target_bytes: bytes) -> dict:
       ≥ 40 → same_person=False, confidence=medium
       <  40 → same_person=False, confidence=high
     """
-    import boto3
     from botocore.exceptions import BotoCoreError, ClientError
-
-    region = (os.environ.get("AWS_REGION")
-              or os.environ.get("AWS_DEFAULT_REGION")
-              or "us-east-1")
-    client = boto3.client("rekognition", region_name=region)
 
     # Step 1: Compare faces
     try:
@@ -160,6 +188,12 @@ def compare_portraits(anh_the_path: Path, doc_path: Path, doc_type: str,
         print("vision_check: thiếu AWS_ACCESS_KEY_ID — bỏ qua vision compare", flush=True)
         return None
 
+    import boto3
+    region = (os.environ.get("AWS_REGION")
+              or os.environ.get("AWS_DEFAULT_REGION")
+              or "us-east-1")
+    client = boto3.client("rekognition", region_name=region)
+
     try:
         raw_a = Path(anh_the_path).read_bytes()
         raw_b = Path(doc_path).read_bytes()
@@ -167,15 +201,16 @@ def compare_portraits(anh_the_path: Path, doc_path: Path, doc_type: str,
         print(f"vision_check: đọc file lỗi: {type(e).__name__}: {e}", flush=True)
         return None
 
-    img_a = _to_image_bytes(raw_a)
-    img_b = _to_image_bytes(raw_b)
+    # For PDFs: scan pages to find the one with a face rather than blindly using page 0
+    img_a = _pdf_find_face_page(raw_a, client) if raw_a[:4] == b"%PDF" else raw_a
+    img_b = _pdf_find_face_page(raw_b, client) if raw_b[:4] == b"%PDF" else raw_b
     if img_a is None or img_b is None:
         print(f"vision_check: convert ảnh thất bại ({Path(anh_the_path).name}, "
               f"{Path(doc_path).name})", flush=True)
         return None
 
     try:
-        result = _rekognition_compare(img_a, img_b)
+        result = _rekognition_compare(img_a, img_b, client)
     except Exception as e:  # noqa: BLE001
         print(f"vision_check: Rekognition lỗi ({Path(anh_the_path).name} vs "
               f"{Path(doc_path).name}): {type(e).__name__}: {e}", flush=True)
