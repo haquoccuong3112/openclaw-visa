@@ -34,12 +34,15 @@ if _env_file.exists():
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
 
-API_ID   = int(os.environ.get("TELEGRAM_API_ID", "0"))
-API_HASH = os.environ.get("TELEGRAM_API_HASH", "")
+API_ID    = int(os.environ.get("TELEGRAM_API_ID", "0"))
+API_HASH  = os.environ.get("TELEGRAM_API_HASH", "")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 if not API_ID or not API_HASH:
     sys.exit("Missing TELEGRAM_API_ID / TELEGRAM_API_HASH in scan-ocr.env")
+if not BOT_TOKEN:
+    sys.exit("Missing TELEGRAM_BOT_TOKEN in scan-ocr.env")
 REGISTRY     = SCRIPT_DIR / "group_registry.json"
-SESSION_FILE = SCRIPT_DIR / "download_history"   # .session suffix added by Pyrogram
+SESSION_FILE = SCRIPT_DIR / "download_history_bot"   # .session suffix added by Pyrogram
 DOWNLOADS    = SCRIPT_DIR / "downloads"
 
 
@@ -135,7 +138,10 @@ async def main():
         print("DRY RUN — no files will be downloaded")
 
     from pyrogram import Client
-    async with Client(str(SESSION_FILE), api_id=API_ID, api_hash=API_HASH) as client:
+
+    # Use bot token — bot is already in all KH groups, no phone login needed
+    async with Client(str(SESSION_FILE), api_id=API_ID, api_hash=API_HASH,
+                      bot_token=BOT_TOKEN) as client:
         for entry in entries:
             try:
                 await download_group(client, entry, limit=args.limit, dry_run=args.dry_run)
