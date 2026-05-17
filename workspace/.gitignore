@@ -12,6 +12,8 @@ memory/
 
 # bot-generated / churny
 scan-ho-so/runs/
+scan-ho-so/downloads/
+scan-ho-so/download_history.session
 scan-ho-so/test-runs/
 scan-ho-so/tests/test-data/
 scan-ho-so/_checkpoints/
