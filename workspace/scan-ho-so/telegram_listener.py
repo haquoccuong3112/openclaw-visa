@@ -45,6 +45,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 from telegram import Update, Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -751,6 +752,10 @@ SCAN_PIPELINE_SCRIPT = os.environ.get(
 SCAN_RUN_CONCURRENCY = int(os.environ.get("SCAN_RUN_CONCURRENCY", "2"))
 SCAN_RUN_SEMAPHORE = asyncio.Semaphore(SCAN_RUN_CONCURRENCY)
 SCAN_MAX_ATTEMPTS = int(os.environ.get("SCAN_MAX_ATTEMPTS", "3"))
+SCAN_LOCAL_RUNS_DIR = Path(
+    os.environ.get("SCAN_LOCAL_RUNS_DIR",
+                   str(Path(__file__).resolve().parent / "runs"))
+)
 # One scan at a time *per case folder* — different cases run in parallel (up to
 # SCAN_RUN_CONCURRENCY) but a given case is never processed by two scan_pipeline.py
 # runs at once (avoids racing on the same Drive folder / duplicate-named files).
@@ -1094,6 +1099,72 @@ def _expand_zips_in_dir(workdir: Path) -> None:
             logger.info(f"unzipped {zp.name} → {n_ext} file(s)")
 
 
+def _save_local_run(workdir: Path | None, manifest: dict, runs_base: Path) -> Path | None:
+    """Archive one pipeline run locally under runs_base/<case_id>/<timestamp>/.
+    Non-fatal — all errors are logged and swallowed."""
+    try:
+        counts = (manifest or {}).get("counts") or {}
+        new_count = (counts.get("uploaded", 0)
+                     + counts.get("uploaded-split", 0)
+                     + counts.get("uploaded-no-ocr", 0))
+        if new_count == 0:
+            return None  # all duplicates or dry-run — nothing worth archiving
+
+        case_id = re.sub(r"[^\w\-]", "_",
+                         (manifest.get("case_id") or "unknown").lower()).strip("_") or "unknown"
+        run_ts = datetime.now().strftime("%Y%m%d-%H%M")
+        run_dir = runs_base / case_id / run_ts
+        n = 2
+        while run_dir.exists():
+            run_dir = runs_base / case_id / f"{run_ts}-{n}"; n += 1
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # input/ — original files from Telegram before cleanup
+        if workdir is not None and workdir.exists():
+            input_dir = run_dir / "input"
+            input_dir.mkdir()
+            for src in workdir.iterdir():
+                if src.is_file():
+                    shutil.copy2(src, input_dir / src.name)
+
+        # manifest.json
+        (run_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # report.md — checklist report text
+        ck = manifest.get("checklist") or {}
+        report_text = ck.get("report_text") or ck.get("report") or ""
+        if report_text:
+            (run_dir / "report.md").write_text(report_text, encoding="utf-8")
+
+        # docs/<stem>.md — md_content per uploaded doc
+        uploadable = {"uploaded", "uploaded-no-ocr", "uploaded-split", "duplicate", "duplicate-by-hash"}
+        docs_written = 0
+        for item in (manifest.get("items") or []):
+            if item.get("status") not in uploadable:
+                continue
+            md = (item.get("md_content") or "").strip()
+            if not md:
+                continue
+            stem = re.sub(r"[^\w\-. ]", "_",
+                          Path(item.get("new_name") or item.get("src_name") or "doc").stem)
+            docs_dir = run_dir / "docs"
+            docs_dir.mkdir(exist_ok=True)
+            out = docs_dir / f"{stem}.md"
+            i = 2
+            while out.exists():
+                out = docs_dir / f"{stem}_{i}.md"; i += 1
+            out.write_text(md, encoding="utf-8")
+            docs_written += 1
+
+        logger.info(f"_save_local_run: {run_dir} "
+                    f"(docs={docs_written} report={'yes' if report_text else 'no'})")
+        return run_dir
+    except Exception as e:   # noqa: BLE001
+        logger.warning(f"_save_local_run failed (ignored): {type(e).__name__}: {e}")
+        return None
+
+
 async def _flush_batch_after(context, chat_id, batch, my_gen: int, delay: float):
     try:
         await asyncio.sleep(delay)
@@ -1150,6 +1221,7 @@ async def _flush_batch_after(context, chat_id, batch, my_gen: int, delay: float)
                     f"dup={c.get('duplicate',0)} dup_hash={c.get('duplicate-by-hash',0)} "
                     f"failed={c.get('failed',0)}")
         _ckpt.unlink(missing_ok=True)   # Telegram gửi xong → xóa checkpoint
+        _save_local_run(batch.workdir, manifest, SCAN_LOCAL_RUNS_DIR)
     except Exception as e:
         logger.error(f"_flush_batch_after {chat_id}: {e}", exc_info=True)
     finally:
@@ -1532,6 +1604,7 @@ async def on_oldfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         f"split={c.get('uploaded-split',0)} no_ocr={c.get('uploaded-no-ocr',0)} "
                         f"dup={c.get('duplicate',0)} dup_hash={c.get('duplicate-by-hash',0)} "
                         f"failed={c.get('failed',0)}")
+            _save_local_run(workdir, manifest, SCAN_LOCAL_RUNS_DIR)
         except Exception as e:  # noqa: BLE001
             logger.error(f"/oldfile {chat_id}: {e}", exc_info=True)
             try:
