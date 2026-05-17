@@ -356,7 +356,10 @@ def _detect_pdf_segments(pages_text: list[dict], applicant: str) -> list[dict] |
         f"Nội dung OCR từng trang:\n{combined}\n\n"
         f"tag phải là một trong: {tag_list}\n"
         "Trả về JSON với danh sách segment, mỗi segment là một giấy tờ riêng biệt. "
-        "Đảm bảo mỗi trang xuất hiện đúng 1 lần trong đúng 1 segment."
+        "Đảm bảo mỗi trang xuất hiện đúng 1 lần trong đúng 1 segment.\n"
+        "LƯU Ý QUAN TRỌNG: Mỗi biên lai, hoá đơn, hoặc giấy chứng nhận riêng lẻ là một segment riêng, "
+        "kể cả khi 2 trang liên tiếp cùng loại và cùng đơn vị phát hành. "
+        "Phân biệt bằng: số chứng từ khác nhau, mặt hàng khác nhau, số tiền khác nhau, hoặc ngày tháng khác nhau."
     )
 
     payload = {
