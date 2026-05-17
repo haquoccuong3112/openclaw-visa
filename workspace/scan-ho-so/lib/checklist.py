@@ -480,6 +480,17 @@ giấy tờ, dạng:
 - [ ] Họ tên + năm sinh cha mẹ trên KS con = trên ĐKKH + CCCD khách hàng
 - [ ] Người đi khai sinh: nếu là ông/bà → tên có khớp KS gốc của khách hàng?
 
+**A8. Ảnh thẻ (hình thẻ):**
+- [ ] Có ảnh thẻ trong hồ sơ? (tag=Anh the) — nếu thiếu → ghi vào PHẦN 3 "THIẾU: Ảnh thẻ"
+- [ ] Kiểm tra photo_flags từ `du_lieu` (bot tự động phân tích ảnh — COI LÀ ĐÁNG TIN CẬY):
+  - `la_mat_moc=false` → 🟡 [8.2a] có trang điểm — yêu cầu chụp lại mặt mộc
+  - `co_trang_suc=true` → 🟡 [8.2b] đeo trang sức — yêu cầu tháo và chụp lại
+  - `co_xam_lo=true` → 🟡 [8.2c] lộ hình xăm — yêu cầu che và chụp lại
+  - `toc_toi_mau=false` → 🟡 [8.2d] tóc sáng màu — yêu cầu nhuộm tối và chụp lại
+  - `phong_nen_trang=false` → 🟡 [8.2e] phông không trắng — yêu cầu chụp lại với phông trắng
+  - Tất cả flags đều đạt (true/false đúng yêu cầu) → ghi ✅ PHẦN 1 "Ảnh thẻ đạt tiêu chuẩn"
+- [ ] Nếu photo_flags null/trống → 🟢 "Bot chưa phân tích được ảnh — cần kiểm tra thủ công tiêu chuẩn 5×7, phông trắng, mặt mộc"
+
 ### B. GIẤY TỜ TÀI CHÍNH & BẢO HIỂM
 
 **B1. Sổ tiết kiệm:**

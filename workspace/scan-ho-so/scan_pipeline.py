@@ -86,7 +86,8 @@ DOC_RESULT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "required": ["tag", "folder", "filename", "subject", "relation",
-                     "confidence", "needs_vision", "person", "summary_vi", "md_content"],
+                     "confidence", "needs_vision", "person", "summary_vi", "md_content",
+                     "photo_flags"],
         "properties": {
             "tag":          {"type": "string"},
             "folder":       {"type": "string",
@@ -113,6 +114,24 @@ DOC_RESULT_SCHEMA = {
             },
             "summary_vi": {"type": "string"},
             "md_content": {"type": "string"},
+            "photo_flags": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["la_mat_moc", "co_trang_suc", "co_xam_lo",
+                                     "toc_toi_mau", "phong_nen_trang"],
+                        "properties": {
+                            "la_mat_moc":      {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                            "co_trang_suc":    {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                            "co_xam_lo":       {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                            "toc_toi_mau":     {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                            "phong_nen_trang": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                        },
+                    },
+                    {"type": "null"},
+                ],
+            },
         },
     },
 }
@@ -277,7 +296,14 @@ def docai_classify_vision(
         "**Số CCCD:** 079123456789  **Ngày cấp:** 15/01/2024\n"
         "**Họ tên:** NGUYỄN VĂN A  **Ngày sinh:** 01/01/1990  **Giới tính:** Nam\n"
         "**Quê quán:** Xã Mỹ Lộc, Tam Bình, Vĩnh Long\n"
-        "**Thường trú:** 45 Đường Nguyễn Trãi, P.2, TP Vĩnh Long"
+        "**Thường trú:** 45 Đường Nguyễn Trãi, P.2, TP Vĩnh Long\n"
+        "• Khi tag=\"Anh the\": điền photo_flags đánh giá ảnh chân dung:\n"
+        "  - la_mat_moc: true=mặt mộc không son phấn/kẻ mắt đậm, false=có trang điểm rõ\n"
+        "  - co_trang_suc: true=có đeo trang sức/kính thời trang, false=không\n"
+        "  - co_xam_lo: true=có hình xăm lộ ra, false=không\n"
+        "  - toc_toi_mau: true=tóc đen/nâu sậm tự nhiên, false=tóc sáng/nhuộm màu lạ\n"
+        "  - phong_nen_trang: true=phông trắng/xanh đơn sắc đủ sáng, false=phông phức tạp/tối\n"
+        "  Dùng null nếu ảnh quá mờ/nhỏ để xác định. Khi tag≠\"Anh the\": photo_flags=null."
     )
 
     text_prompt = f"Tên file: {filename}\n\nTEXT OCR:\n{text_block[:12000]}"
@@ -850,7 +876,7 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
                 "confidence": cls.confidence if can_ocr else "low",
                 "needs_review": needs_review, "is_english": is_eng,
                 "ocr": can_ocr, "summary": summary, "md_content": md_content,
-                "extracted": {},   # kept for backward compat (build_dataset reads as du_lieu)
+                "extracted": gem.get("photo_flags") or {},  # photo quality flags for "Anh the" (rules 8.2a–8.2e)
                 "content_hash": content_hash,
                 "case_id": case_id,
             }
