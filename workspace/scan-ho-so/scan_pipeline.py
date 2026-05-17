@@ -322,6 +322,93 @@ def _docai_ocr_one(path: "Path", src_name: str) -> "list[dict] | None":
         return None
 
 
+def _detect_pdf_segments(pages_text: list[dict], applicant: str) -> list[dict] | None:
+    """One GPT call on all per-page OCR text → detect document boundaries.
+
+    Returns list of segments [{"pages": [1,2,...], "tag": "CCCD"}, ...] when the
+    PDF contains multiple documents. Returns None if single-doc or on error.
+    Only meaningful for PDFs with >1 page (caller must check).
+    """
+    if len(pages_text) <= 1:
+        return None
+
+    page_blocks = [f'[Trang {p["page"]}]\n{p.get("text","") or "(trống)"}' for p in pages_text]
+    combined = "\n\n".join(page_blocks)
+
+    try:
+        from lib.rule_loader import generate_doc_type_catalog
+        tag_list = ", ".join(
+            t.get("tag", "") for t in __import__("yaml").safe_load(
+                open(SCAN_HO_SO_DIR / "data" / "doc_types.yaml", encoding="utf-8")
+            ).get("doc_types", []) if t.get("tag")
+        )
+    except Exception:  # noqa: BLE001
+        tag_list = "CCCD, Passport, GPLX, GKS, GKH, LLTP, XNCT, CT07, STK, Saoke, Sodat, DKKD, BHYT, BHXH, Anhthe, CV, Bangcap, Khac"
+
+    system = (
+        "Bạn phân tích văn bản OCR từ một file PDF có thể chứa nhiều loại giấy tờ Việt Nam ghép lại. "
+        "Xác định ranh giới giữa các giấy tờ dựa vào nội dung OCR từng trang. "
+        "Nếu toàn bộ file là một giấy tờ, trả đúng 1 segment. "
+        "Trả về JSON: {\"segments\": [{\"pages\": [<số trang 1-based>,...], \"tag\": \"<loại>\"}]}"
+    )
+    user = (
+        f"Khách hàng: {applicant}\n\n"
+        f"Nội dung OCR từng trang:\n{combined}\n\n"
+        f"tag phải là một trong: {tag_list}\n"
+        "Trả về JSON với danh sách segment, mỗi segment là một giấy tờ riêng biệt. "
+        "Đảm bảo mỗi trang xuất hiện đúng 1 lần trong đúng 1 segment."
+    )
+
+    payload = {
+        "model": OCR_CLASSIFY_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        raw = _call_classify_api(payload, timeout=60)
+        data = json.loads(raw)
+        segments = data.get("segments", [])
+        if not segments or len(segments) <= 1:
+            return None
+        # Validate: every page covered exactly once
+        all_pages = [pg for seg in segments for pg in seg.get("pages", [])]
+        expected = list(range(1, len(pages_text) + 1))
+        if sorted(all_pages) != expected:
+            log(f"  _detect_pdf_segments: page coverage invalid {sorted(all_pages)} vs {expected}, skip split")
+            return None
+        return segments
+    except Exception as e:  # noqa: BLE001
+        log(f"  _detect_pdf_segments error (skip split): {type(e).__name__}: {e}")
+        return None
+
+
+def _split_pdf_segments(path: Path, segments: list[dict], workdir: Path) -> list[tuple[Path, dict]]:
+    """Extract page ranges from a PDF into workdir (temp dir). Returns [(seg_path, seg_meta)]."""
+    import io as _io
+    import pypdf
+    reader = pypdf.PdfReader(str(path))
+    results = []
+    for seg in segments:
+        pages = seg.get("pages", [])
+        if not pages:
+            continue
+        writer = pypdf.PdfWriter()
+        for pg in pages:
+            idx = pg - 1   # 0-based
+            if 0 <= idx < len(reader.pages):
+                writer.add_page(reader.pages[idx])
+        buf = _io.BytesIO()
+        writer.write(buf)
+        seg_name = f"{path.stem}[p{pages[0]}-{pages[-1]}]{path.suffix}"
+        seg_path = workdir / seg_name
+        seg_path.write_bytes(buf.getvalue())
+        results.append((seg_path, seg))
+    return results
+
+
 def docai_prefetch(files: list, *, dry_run: bool, workers: int) -> dict:
     """DocAI OCR ĐỒNG THỜI mọi file OCR-được → {src_name: pages_text | None}.
     File không OCR được (ext lạ) hoặc khi --dry-run: bỏ qua (không thêm vào dict)."""
@@ -1026,8 +1113,70 @@ def main(argv=None) -> int:
 
         name_registry: dict = {}
         items = []
+        split_path_map: dict[str, str] = {}   # seg_src_name → local path (for vision_compare)
         for idx, (path, src_name) in enumerate(files, 1):
             log(f"[{idx}/{total}] {src_name}")
+
+            # --- Multi-doc PDF splitting ---
+            _pages = ocr_cache.get(src_name)
+            if (path.suffix.lower() == ".pdf"
+                    and isinstance(_pages, list) and len(_pages) > 1
+                    and not args.dry_run):
+                segments = _detect_pdf_segments(_pages, applicant)
+                if segments:
+                    log(f"  split: {src_name} → {len(segments)} segments")
+                    tmpdir = Path(tempfile.mkdtemp(prefix="scan_split_"))
+                    try:
+                        split_parts = _split_pdf_segments(path, segments, tmpdir)
+
+                        # Parallel: rasterize first page + GPT classify per segment.
+                        # OCR text sliced from ocr_cache — no DocAI call needed.
+                        _pages_set_cache = {p["page"]: p for p in _pages}
+
+                        def _classify_seg(sp_sm):
+                            sp, sm = sp_sm
+                            page_nums = sm.get("pages", [])
+                            sp_pages = [_pages_set_cache[pg] for pg in page_nums
+                                        if pg in _pages_set_cache]
+                            img = _rasterize_first_page(sp)
+                            b64 = base64.b64encode(img).decode() if img else None
+                            gem = docai_classify_vision(sp_pages, sp.name, applicant, b64)
+                            return sp.name, sp_pages, gem
+
+                        n_seg = max(1, min(OCR_WORKERS, len(split_parts)))
+                        seg_classify: dict[str, tuple] = {}
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=n_seg) as ex:
+                            futs = {ex.submit(_classify_seg, (sp, sm)): (sp, sm)
+                                    for sp, sm in split_parts}
+                            for fut in concurrent.futures.as_completed(futs):
+                                sp, sm = futs[fut]
+                                try:
+                                    sname, sp_pages, gem = fut.result()
+                                    seg_classify[sname] = (sp_pages, gem)
+                                except Exception as e:  # noqa: BLE001
+                                    log(f"  segment classify error {sp.name}: {e}")
+                                    seg_classify[sp.name] = ([], {})
+
+                        # Sequential: Drive upload (Drive client is not thread-safe)
+                        for seg_path, seg_meta in split_parts:
+                            seg_src = seg_path.name
+                            seg_pages, seg_gem = seg_classify.get(seg_src, ([], {}))
+                            it = process_one(seg_path, seg_src,
+                                             case_folder_id=case_folder_id or "", applicant=applicant,
+                                             case_id=case_id, retries=args.retries, dry_run=args.dry_run,
+                                             sop=sop, name_registry=name_registry,
+                                             pages_text=seg_pages, gem_cache=seg_gem,
+                                             force_rescan=args.force_rescan)
+                            it["split_from"] = src_name
+                            it["split_pages"] = seg_meta.get("pages", [])
+                            if it.get("status") == "uploaded":
+                                it["status"] = "uploaded-split"
+                            split_path_map[seg_src] = str(seg_path)
+                            log(f"     -> {it.get('status','?')}  {it.get('new_name','')}")
+                            items.append(it)
+                    finally:
+                        shutil.rmtree(tmpdir, ignore_errors=True)
+                    continue   # skip normal process_one for this file
 
             # Single-doc path (all files)
             it = process_one(path, src_name, case_folder_id=case_folder_id or "", applicant=applicant,
@@ -1077,6 +1226,7 @@ def main(argv=None) -> int:
                 from lib import vision_check as _vc
                 # Map src_name → local path (files đã ở workdir trước cleanup)
                 src_to_path = {src_name: str(p) for (p, src_name) in files}
+                src_to_path.update(split_path_map)   # include split segments
                 items_with_paths = []
                 for it in items:
                     src = it.get("src_name") or ""
