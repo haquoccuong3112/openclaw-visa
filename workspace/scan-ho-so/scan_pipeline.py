@@ -50,6 +50,7 @@ import sys
 import tempfile
 import time
 import traceback
+import rarfile
 import zipfile
 from pathlib import Path
 
@@ -87,7 +88,7 @@ DOC_RESULT_SCHEMA = {
         "additionalProperties": False,
         "required": ["tag", "folder", "filename", "subject", "relation",
                      "confidence", "needs_vision", "person", "summary_vi", "md_content",
-                     "photo_flags"],
+                     "photo_flags", "dien_tich_m2", "loai_dat", "so_dat_owner"],
         "properties": {
             "tag":          {"type": "string"},
             "folder":       {"type": "string",
@@ -112,8 +113,11 @@ DOC_RESULT_SCHEMA = {
                     },
                 },
             },
-            "summary_vi": {"type": "string"},
-            "md_content": {"type": "string"},
+            "summary_vi":    {"type": "string"},
+            "md_content":    {"type": "string"},
+            "dien_tich_m2":  {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+            "loai_dat":      {"anyOf": [{"type": "string"},  {"type": "null"}]},
+            "so_dat_owner":  {"anyOf": [{"type": "string"},  {"type": "null"}]},
             "photo_flags": {
                 "anyOf": [
                     {
@@ -141,9 +145,12 @@ DOCAI_OCR_EXTS = {
     ".tiff", ".tif", ".bmp", ".webp", ".gif",
     ".doc", ".docx",
 }
-TOP_FOLDERS = ["Personal Docs", "Education", "Asset", "Employment"]
+TOP_FOLDERS = ["Personal Docs", "Education", "Asset", "Employment", "Photos"]
 OCR_META_FOLDER = "_Bot OCR & Metadata"
 DA_DUYET_FOLDER = "Đã duyệt"   # staff review folder — bot reads, never writes files here
+PHOTOS_FOLDER       = "Photos"
+DATA_BY_DATE_FOLDER = "Data by date"
+# Ảnh → Photos: set `folder: Photos` trong data/doc_types.yaml là đủ — không cần sửa code.
 # Số file được DocAI OCR + GPT vision classify ĐỒNG THỜI. Upload Drive + thẩm định vẫn tuần tự.
 OCR_WORKERS = max(1, int(os.environ.get("SCAN_OCR_WORKERS", "5")))
 
@@ -174,7 +181,12 @@ def log(msg: str) -> None:
 # ============================================================================
 # file enumeration  (the part that used to "miss files")
 # ============================================================================
+_SKIP_SUFFIXES = {".json", ".md"}  # sidecar/data files — không phải giấy tờ
+
+
 def is_macos_junk(rel: Path) -> bool:
+    if rel.suffix.lower() in _SKIP_SUFFIXES:
+        return True
     return "__MACOSX" in rel.parts or rel.name.startswith("._") or rel.name == ".DS_Store"
 
 
@@ -203,6 +215,23 @@ def collect_from_zip(zip_path: Path, workdir: Path) -> list[tuple[Path, str]]:
                 continue
             dst = workdir / f"{i:03d}_{base}"
             with zf.open(m) as src, dst.open("wb") as fh:
+                shutil.copyfileobj(src, fh)
+            out.append((dst, base))
+    return out
+
+
+def collect_from_rar(rar_path: Path, workdir: Path) -> list[tuple[Path, str]]:
+    """Extract every real member of the rar into workdir; return [(path, basename)]."""
+    out = []
+    with rarfile.RarFile(rar_path) as rf:
+        members = [m for m in rf.infolist()
+                   if not m.is_dir() and not is_macos_junk(Path(m.filename))]
+        for i, m in enumerate(members, 1):
+            base = Path(m.filename).name
+            if not base:
+                continue
+            dst = workdir / f"{i:03d}_{base}"
+            with rf.open(m) as src, dst.open("wb") as fh:
                 shutil.copyfileobj(src, fh)
             out.append((dst, base))
     return out
@@ -283,11 +312,20 @@ def docai_classify_vision(
         "PHÂN LOẠI THEO BẢN CHẤT GIẤY TỜ (không theo thông tin được nhắc tới):\n"
         "• CCCD = tấm thẻ in 2 mặt có ảnh chân dung + chip/QR\n"
         "• Sao kê ngân hàng = CÓ kỳ sao kê (từ ngày–đến ngày) + danh sách giao dịch nhiều dòng + số dư đầu/cuối kỳ\n"
+        "• STK = sổ tiết kiệm vật lý (passbook/sổ cứng): có 'sổ tiết kiệm' + 'kỳ hạn' + 'lãi suất'/'ngày đáo hạn' "
+        "— dạng sổ ngân hàng, KHÔNG phải thư xác nhận → tag='STK'\n"
+        "• XN so du = thư/giấy xác nhận số dư từ ngân hàng: có 'xác nhận số dư'/'balance confirmation'/'này xác nhận' "
+        "— thường song ngữ EN/VN, kèm quy đổi USD → tag='XN so du'\n"
         '• Thông tin cá nhân (tự khai) → tag="CV" — khi khách hàng tự ghi/điền biểu mẫu\n'
-        '• Ảnh thẻ (chân dung 1 người, phông đơn sắc) → tag="Anh the"\n'
+        '• Ảnh thẻ / ảnh hộ chiếu (chân dung 1 người nhìn thẳng dùng nộp hồ sơ, phông đơn sắc hoặc không) → tag="Anh the" — phân biệt với ảnh nông nghiệp/hoạt động\n'
         "• Ảnh trên giấy tờ (CCCD, hộ chiếu, bằng cấp) → phân loại theo giấy tờ đó, KHÔNG phải ảnh thẻ\n"
         "• bs = bản sao (viết tắt), KHÔNG phải tên người và KHÔNG phải bố\n"
-        "• KHÔNG suy diễn relation nếu văn bản không ghi rõ chữ 'cha/bố/mẹ/vợ/chồng/con'\n\n"
+        "• KHÔNG suy diễn relation nếu văn bản không ghi rõ chữ 'cha/bố/mẹ/vợ/chồng/con'\n"
+        "• Ảnh chụp màn hình KHÔNG phải giấy tờ: màn hình chat (bong bóng Zalo/Messenger/Telegram), "
+        "bản đồ/Google Maps, feed mạng xã hội (Facebook/TikTok/Instagram), màn hình cài đặt/thông báo "
+        "hệ thống, video player đang phát → tag='Khac'\n"
+        "  KHÔNG Khac: screenshot app ngân hàng CÓ nội dung sao kê/số dư thực → classify theo nội dung\n"
+        "  KHÔNG Khac: ảnh chụp bằng camera (có shadow/distortion, giấy tờ vật lý trong khung)\n\n"
         "FIELD md_content: Viết markdown tóm tắt TOÀN BỘ thông tin quan trọng của giấy tờ này "
         "(tất cả ngày tháng, số hiệu, tên, địa chỉ, số tiền, hạn sử dụng). "
         "Đây là nguồn data cho step thẩm định — càng đầy đủ càng tốt.\n"
@@ -303,7 +341,44 @@ def docai_classify_vision(
         "  - co_xam_lo: true=có hình xăm lộ ra, false=không\n"
         "  - toc_toi_mau: true=tóc đen/nâu sậm tự nhiên, false=tóc sáng/nhuộm màu lạ\n"
         "  - phong_nen_trang: true=phông trắng/xanh đơn sắc đủ sáng, false=phông phức tạp/tối\n"
-        "  Dùng null nếu ảnh quá mờ/nhỏ để xác định. Khi tag≠\"Anh the\": photo_flags=null."
+        "  Dùng null nếu ảnh quá mờ/nhỏ để xác định. Khi tag≠\"Anh the\": photo_flags=null.\n\n"
+        "⚠️ NỘI DUNG THỰC TẾ > TÊN FILE — phân loại theo BẢN CHẤT, KHÔNG theo tên file:\n"
+        "• So dat / So dat NN = GCNQSDĐ có từ khoá 'thửa đất số', 'tờ bản đồ', 'diện tích m²', "
+        "'quyền sử dụng đất' → tag='So dat' DÙ file tên 'CCCD' hay bất kỳ tên gì khác\n"
+        "• XNCT = CT07 xác nhận cư trú có 'cư trú'/'thường trú'/'tạm trú'/'xác nhận' "
+        "→ tag='XNCT' DÙ file tên 'CV'\n"
+        "• Vang = hoá đơn mua vàng/bạc/kim loại quý (có 'vàng', 'SJC', 'PNJ', 'gram', 'chỉ') "
+        "→ tag='Vang'\n"
+        "• Bien lai = biên lai thu tiền, hoá đơn dịch vụ KHÔNG phải vàng → tag='Bien lai'\n\n"
+        "FIELD filename — tên SOP rút gọn dùng làm tên file thực tế "
+        "(không dấu tiếng Việt, không tên người, dùng khoảng trắng thay vì dấu gạch dưới _, tối đa 60 ký tự):\n"
+        "• Bằng cấp do trường học cấp — đọc từ khoá OCR để phân cấp "
+        "(PHÂN BIỆT: bằng tốt nghiệp trường='Bang cap...'; chứng chỉ nghề='Chung chi...'):\n"
+        "  'tiểu học'/'cấp I'/'lớp 5' → 'Bang cap Cap 1'\n"
+        "  'trung học cơ sở'/'THCS'/'phổ thông cơ sở'/'lớp 9' → 'Bang cap Cap 2'\n"
+        "  'trung học phổ thông'/'THPT'/'lớp 12'/'tú tài'/'phổ thông trung học' → 'Bang cap Cap 3'\n"
+        "  'cao đẳng'/'college' → 'Bang cap Cao dang'\n"
+        "  'đại học'/'cử nhân'/'bachelor'/'university' → 'Bang cap Dai hoc'\n"
+        "  Không xác định được cấp → 'Bang cap'\n"
+        "• Chứng chỉ kỹ năng/nghề/ngoại ngữ (KHÔNG phải bằng tốt nghiệp trường): "
+        "tên cụ thể — 'Chung chi lam vuon', 'Chung chi nghe', 'CC tin hoc', 'Chung chi IELTS'\n"
+        "• Sổ đỏ/hồng: 'So dat CB 542776' (thêm ký hiệu + số thửa/phiếu nếu đọc được)\n"
+        "• Hợp đồng cho/tặng/thừa kế sổ đất: 'HDCT So dat CB 542776'\n"
+        "Với tài liệu tag 'So dat' hoặc 'So dat NN' — bắt buộc điền thêm 3 field sau:\n"
+        "  • loai_dat: mã loại đất viết tắt đúng theo sổ (VD: 'ODT','ONT','CLN','LUC','RSX','NTS','HNK','BHK','LMU'...). null nếu không đọc được.\n"
+        "  • dien_tich_m2: diện tích m² ghi trên sổ (integer, VD: 150, 1500, 5000). null nếu không đọc được.\n"
+        "  • so_dat_owner: quan hệ chủ sổ với đương đơn, viết compact ('applicant' nếu chính đương đơn, 'ba','me','bame' nếu cả ba+mẹ,'vo','chong','con','ongbanoi','ongbangoai','ongba','khac'). null nếu không phải sổ đỏ.\n"
+        "Với mọi tài liệu KHÁC sổ đỏ: dien_tich_m2=null, loai_dat=null, so_dat_owner=null.\n"
+        "• Biên lai / hoá đơn — phân loại cụ thể:\n"
+        "  Hóa đơn mua vàng/bạc/kim loại quý (có 'vàng','SJC','PNJ','gram','chỉ') → 'Hoa don vang'\n"
+        "  Biên lai BHXH tự nguyện → 'Bien lai BHXH'\n"
+        "  Biên lai BHYT → 'Bien lai BHYT'\n"
+        "  Biên lai/hoá đơn khác → 'Bien lai [loại cụ thể]'\n"
+        "• Sao kê/STK (tag='Sao ke'): nếu ảnh cho thấy dấu mộc đỏ tròn → ghi "
+        "'Có dấu mộc đỏ giáp lai.' vào md_content; nếu không thấy rõ → ghi "
+        "'Dấu mộc: cần kiểm tra bản gốc.' (KHÔNG tự kết luận thiếu dấu)\n"
+        "• Mọi loại khác đã rõ (CCCD, Passport, GKS, BHYT...): "
+        "dùng catalog tag như bình thường"
     )
 
     text_prompt = f"Tên file: {filename}\n\nTEXT OCR:\n{text_block[:12000]}"
@@ -385,7 +460,22 @@ def _detect_pdf_segments(pages_text: list[dict], applicant: str) -> list[dict] |
         "Đảm bảo mỗi trang xuất hiện đúng 1 lần trong đúng 1 segment.\n"
         "QUY TẮC GỘP TRANG: Các trang liên tiếp từ CÙNG đơn vị phát hành (cùng tên công ty/cơ quan) "
         "và liên quan đến cùng một giao dịch/hồ sơ thì GỘP vào 1 segment. "
-        "Chỉ tách segment mới khi đơn vị phát hành KHÁC hoặc loại giấy tờ hoàn toàn khác nhau."
+        "Chỉ tách segment mới khi đơn vị phát hành KHÁC hoặc loại giấy tờ hoàn toàn khác nhau.\n"
+        "• Hợp đồng (HDCT/HD cho/tặng/thừa kế) gồm nhiều trang: trang điều khoản + trang chứng thực "
+        "UBND/công chứng/xác nhận kèm theo = CÙNG 1 segment — KHÔNG tách trang chứng thực ra dù "
+        "có dấu mộc/chữ ký khác ở trang đó. Cùng số hợp đồng hoặc cùng bên A/B = cùng 1 segment.\n"
+        "• Hộ chiếu (Passport): trang nhân thân (bio page có ảnh/họ tên) + TẤT CẢ trang thị thực/"
+        "mộc xuất nhập cảnh/trang trắng tiếp theo = CÙNG 1 segment cho đến khi gặp giấy tờ "
+        "hoàn toàn khác. KHÔNG tách trang visa stamp / mộc nhập xuất cảnh ra khỏi trang nhân thân.\n"
+        "⚠️ TÁCH RIÊNG BẮT BUỘC:\n"
+        "• Trang có 'thửa đất số', 'GCNQSDĐ', 'quyền sử dụng đất', 'diện tích m²' "
+        "→ segment riêng tag='So dat' (hoặc 'So dat NN' nếu đất nông nghiệp), "
+        "KHÔNG GỘP với CCCD hay giấy tờ nhân thân dù cùng 1 file\n"
+        "• Mỗi chủ sở hữu sổ đất khác nhau = segment riêng\n"
+        "• CCCD (ảnh chân dung + chip/QR + số 12 chữ số) KHÔNG GỘP với sổ đất\n"
+        "• Giấy tờ tự khai (thông tin cá nhân, thông tin gia đình, sơ yếu lý lịch do khách tự điền/viết tay) "
+        "→ tag='CV', luôn là segment RIÊNG, KHÔNG GỘP với bất kỳ giấy tờ chính thức nào "
+        "(XNCT, CT07, LLTP, CCCD, v.v.) dù cùng 1 file"
     )
 
     payload = {
@@ -771,13 +861,15 @@ def _items_to_dataset(items: list[dict]) -> list[dict]:
     return out
 
 
+_SO_DAT_TAGS = frozenset({"So dat", "So dat NN"})
+
 # ============================================================================
 # process one file (with retries)
 # ============================================================================
 def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: str,
                 case_id: str, retries: int, dry_run: bool, sop, name_registry: dict,
                 pages_text: list | None = None, gem_cache: dict | None = None,
-                force_rescan: bool = False) -> dict:
+                force_rescan: bool = False, dbd_batch_id: str | None = None) -> dict:
     classify_doc_type, build_filename, detect_english, title_case_ascii = sop
     ext = path.suffix.lower()
     can_ocr = ext in DOCAI_OCR_EXTS
@@ -793,22 +885,42 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
         if existing:
             _old_name = existing.get("new_name", "")
             _old_tag  = existing.get("tag", "Khac")
-            # Rebuild tên theo code HIỆN TẠI để phát hiện naming drift
-            try:
-                _rebuilt = build_filename(
-                    _old_tag,
-                    existing.get("subject", ""),
-                    existing.get("ext", path.suffix.lower()),
-                    relation=existing.get("relation"),
-                    is_english=bool(existing.get("is_english")),
-                )
-            except Exception:  # noqa: BLE001
-                _rebuilt = _old_name
-            _name_drifted = bool(_old_name and _rebuilt != _old_name)
+            # sop_tag lưu trong sidecar mới; sidecars cũ fallback về tag
+            _old_sop_tag = existing.get("sop_tag") or _old_tag
+            # Sổ đỏ cũ (trước khi có dien_tich_m2) → force re-OCR để rebuild tên mới
+            if _old_sop_tag in _SO_DAT_TAGS and existing.get("dien_tich_m2") is None:
+                _name_drifted = True
+            else:
+                # Rebuild tên theo code HIỆN TẠI để phát hiện naming drift
+                # Dùng is_applicant_doc từ sidecar để tính đúng tên (applicant → bỏ tên)
+                _is_old_applicant = existing.get("is_applicant_doc", False)
+                _subj_rebuild = "" if _is_old_applicant else existing.get("subject", "")
+                try:
+                    _rebuilt = build_filename(
+                        _old_sop_tag,
+                        _subj_rebuild,
+                        existing.get("ext", path.suffix.lower()),
+                        relation=existing.get("relation"),
+                        is_english=bool(existing.get("is_english")),
+                    )
+                except Exception:  # noqa: BLE001
+                    _rebuilt = _old_name
+                _name_drifted = bool(_old_name and _rebuilt != _old_name)
+            # Folder drift: tag hiện tại route sang folder khác (vd Anh-video lam nong → Photos)
+            _expected_folder = classify_doc_type(_old_sop_tag, "", "").folder or (existing.get("folder") or "Personal Docs")
+            _folder_drifted = _expected_folder != (existing.get("folder") or "Personal Docs")
+            if not _name_drifted:
+                _name_drifted = _folder_drifted
             # da-duyet file được staff review — nếu tag Khac vẫn giữ nguyên (không re-OCR)
             _was_khac     = (_old_tag == "Khac") and existing.get("source") != "da-duyet"
             if not _name_drifted and not _was_khac:
                 log(f"  {src_name} → duplicate-by-hash (đã có {_old_name!r}, skip upload)")
+                if dbd_batch_id:
+                    try:
+                        from lib.drive_helpers import upload_file as _uf_dbd
+                        _uf_dbd(str(path), _old_name, dbd_batch_id, drive_id=SHARED_DRIVE_ID, mime=mime)
+                    except Exception as _dbd_err:  # noqa: BLE001
+                        log(f"  data-by-date copy (dup-hash) thất bại: {_dbd_err}")
                 return {
                     "src_name": src_name,
                     "new_name": _old_name,
@@ -828,9 +940,9 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
                     "drive_link": existing.get("drive_link", ""),
                     "content_hash": content_hash,
                 }
-            # Tên drift hoặc tag cũ Khac → fall through để re-OCR + re-classify + upload tên đúng
-            _reason = "name-drift" if _name_drifted else "was-Khac"
-            log(f"  {src_name} → re-process ({_reason}): old={_old_name!r} rebuilt={_rebuilt!r}")
+            # Tên drift / folder drift / tag cũ Khac → fall through để re-classify + upload đúng chỗ
+            _reason = "folder-drift" if _folder_drifted else ("name-drift" if _name_drifted else "was-Khac")
+            log(f"  {src_name} → re-process ({_reason}): old={_old_name!r} folder={existing.get('folder')!r}→{_expected_folder!r}")
             _old_drive_info = {"old_name": _old_name, "old_folder": existing.get("folder") or "Personal Docs"}
 
     last_err = None
@@ -854,31 +966,63 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
                 gem = {}
 
             raw_dt = gem.get("tag", "")
+            sop_tag = (gem.get("filename") or "").strip()[:60]  # GPT's specific SOP name
             summary = str(gem.get("summary_vi", ""))[:400]
             md_content = str(gem.get("md_content", ""))
             cls = classify_doc_type(raw_dt, summary, src_name)
+            # Nếu GPT filename gợi ý loại cụ thể hơn tag → dùng thay thế
+            # (vd: tag="CCCD" nhưng filename="So dat BP..." → cls nên là So dat)
+            if sop_tag and cls.tag not in ("Khac",):
+                _cls_sop = classify_doc_type(sop_tag, summary, src_name)
+                if _cls_sop.tag not in ("Khac",) and _cls_sop.tag != cls.tag:
+                    cls = _cls_sop
             needs_review = cls.needs_review or (not can_ocr)
             subject_raw = subject_from_gemini(gem, applicant) or _strip_trailing_year(applicant)
             subject_title = title_case_ascii(subject_raw) or "Unknown"
             is_eng = detect_english(summary, "")
             relation = gem.get("relation", "") or ""
+            _is_applicant_doc = (relation == "applicant")  # capture trước khi clear
             if relation == "applicant":
                 relation = ""
+            # Omit name from filename when doc belongs to applicant
+            _subject_for_name = "" if _is_applicant_doc else subject_title
+            # sop_tag: dùng GPT filename nếu có (cụ thể hơn), fallback về catalog tag
+            _drive_tag = sop_tag or cls.tag
             # Only the first retry attempt may consume a registry slot per file;
             # build it once on attempt 1 and reuse it on later attempts.
             if attempt == 1 or "new_name" not in locals():
-                new_name = dedup_name(name_registry, cls.tag, subject_title, path.suffix, is_eng, build_filename,
-                                      relation=relation)
+                if cls.tag in _SO_DAT_TAGS:
+                    from lib.sop_naming import build_so_dat_filename as _bsdf
+                    _area   = gem.get("dien_tich_m2")
+                    _loai   = gem.get("loai_dat")
+                    _owner  = gem.get("so_dat_owner") or ""
+                    _base   = _bsdf(cls.tag, _loai, _area, _owner, path.suffix)
+                    _sd_key = _base.lower()
+                    _sd_n   = name_registry.get(_sd_key, 0) + 1
+                    name_registry[_sd_key] = _sd_n
+                    if _sd_n > 1:
+                        _stem, _xext = _base.rsplit(".", 1)
+                        new_name = f"{_stem} {_sd_n}.{_xext}"
+                    else:
+                        new_name = _base
+                else:
+                    new_name = dedup_name(name_registry, _drive_tag, _subject_for_name, path.suffix, is_eng,
+                                          build_filename, relation=relation)
 
             item = {
                 "src_name": src_name, "new_name": new_name, "ext": ext,
-                "tag": cls.tag, "folder": cls.folder, "subject": subject_title, "relation": relation,
+                "tag": cls.tag, "sop_tag": _drive_tag, "folder": cls.folder,
+                "subject": subject_title, "relation": relation,
                 "confidence": cls.confidence if can_ocr else "low",
                 "needs_review": needs_review, "is_english": is_eng,
                 "ocr": can_ocr, "summary": summary, "md_content": md_content,
                 "extracted": gem.get("photo_flags") or {},  # photo quality flags for "Anh the" (rules 8.2a–8.2e)
                 "content_hash": content_hash,
                 "case_id": case_id,
+                "is_applicant_doc": _is_applicant_doc,
+                "dien_tich_m2":     gem.get("dien_tich_m2"),
+                "loai_dat":         gem.get("loai_dat"),
+                "so_dat_owner":     gem.get("so_dat_owner"),
             }
 
             if dry_run:
@@ -887,10 +1031,19 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
                 return item
 
             from lib.drive_helpers import get_or_create_folder, upload_file
-            top_id = get_or_create_folder(cls.folder, case_folder_id, drive_id=SHARED_DRIVE_ID)
+            _dest_folder = cls.folder  # Photos khi doc_types.yaml set folder: Photos
+            item["folder"] = _dest_folder
+            top_id = get_or_create_folder(_dest_folder, case_folder_id, drive_id=SHARED_DRIVE_ID)
             up = upload_file(str(path), new_name, top_id, drive_id=SHARED_DRIVE_ID, mime=mime)
             item["drive_link"] = up["link"]
             item["status"] = "duplicate" if up.get("skipped") else ("uploaded" if can_ocr else "uploaded-no-ocr")
+
+            # Data by date: upload_file (idempotent — skip nếu cùng tên đã có)
+            if dbd_batch_id:
+                try:
+                    upload_file(str(path), new_name, dbd_batch_id, drive_id=SHARED_DRIVE_ID, mime=mime)
+                except Exception as _dbd_err:  # noqa: BLE001
+                    log(f"  data-by-date copy thất bại (best-effort): {_dbd_err}")
 
             # Nếu re-process do name drift: xoá file cũ sai tên trên Drive (best-effort)
             if _old_drive_info and item.get("status") == "uploaded":
@@ -920,7 +1073,7 @@ def process_one(path: Path, src_name: str, *, case_folder_id: str, applicant: st
                 eng = " 🌐 ENG" if is_eng else ""
                 md = (
                     f"# {new_name}\n\n"
-                    f"**Loại:** {cls.tag} | **Folder:** {cls.folder}\n"
+                    f"**Loại:** {cls.tag} | **Folder:** {_dest_folder}\n"
                     f"**Người:** {item['subject']} | **Confidence:** {item['confidence']}{review}{eng}\n"
                     f"**File gốc:** {src_name}\n\n"
                     + (md_content if md_content else f"## Tóm tắt\n{summary or '(no OCR)'}")
@@ -962,7 +1115,7 @@ def resolve_from_registry(chat_id: str) -> dict:
         raise SystemExit(f"chat_id {chat_id} has no folder_id yet (case not set up)")
     case_id = re.sub(r"\s+", "-", applicant.upper()[:20]) + (f"-{visa}" if visa else "")
     return {"case_folder_id": folder_id, "applicant": applicant, "case_id": case_id,
-            "drive_link": info.get("drive_link", "")}
+            "visa": visa, "drive_link": info.get("drive_link", "")}
 
 
 # ============================================================================
@@ -1039,8 +1192,8 @@ def run_self_test() -> int:
         assert _ck.should_run_checklist({"items": [{"tag": "Khac"}]}) is False
         _cov = _ck.compute_coverage([{"loai": "CCCD", "ten": "x", "nguoi": "y"}])
         assert _cov["required"] == 18 and _cov["have"] >= 1 and len(_cov["items"]) == 26
-        _p = _ck._build_prompt("12/05/2026", "Test", _cov)
-        assert "PHẦN 4" in _p and "{{" not in _p
+        _p = _ck._build_nhan_xet_prompt("12/05/2026", "Test", _cov)
+        assert "NHẬN XÉT HỒ SƠ" in _p and "{{" not in _p
         print(f"checklist module OK (model={_ck.CHECKLIST_MODEL}, provinces_loaded={bool(_ck.PROVINCES)})")
     except Exception as e:  # noqa: BLE001
         print(f"checklist module SELF-TEST FAILED: {type(e).__name__}: {e}")
@@ -1087,11 +1240,13 @@ def main(argv=None) -> int:
     case_folder_id = args.case_folder_id
     applicant = args.applicant
     case_id = args.case_id
+    visa = ""
     if args.from_registry:
         info = resolve_from_registry(args.from_registry)
         case_folder_id = case_folder_id or info["case_folder_id"]
         applicant = applicant or info["applicant"]
         case_id = case_id or info["case_id"]
+        visa = info.get("visa", "")
     if not args.dry_run and not case_folder_id:
         ap.error("--case-folder-id (or --from-registry) is required unless --dry-run")
     if not case_id:
@@ -1112,9 +1267,12 @@ def main(argv=None) -> int:
             raise SystemExit("no input and not --checklist-only")
         elif in_path.is_dir():
             files = collect_from_dir(in_path)
-        elif in_path.suffix.lower() == ".zip":
+        elif in_path.suffix.lower() in {".zip", ".rar"}:
             tmpdir = Path(tempfile.mkdtemp(prefix="scan_pipeline_"))
-            files = collect_from_zip(in_path, tmpdir)
+            if in_path.suffix.lower() == ".rar":
+                files = collect_from_rar(in_path, tmpdir)
+            else:
+                files = collect_from_zip(in_path, tmpdir)
         else:
             # a single loose file
             files = [(in_path, in_path.name)]
@@ -1143,6 +1301,17 @@ def main(argv=None) -> int:
         name_registry: dict = {}
         items = []
         split_path_map: dict[str, str] = {}   # seg_src_name → local path (for vision_compare)
+
+        # Data by date: tạo daily subfolder 1 lần cho toàn batch (idempotent qua get_or_create)
+        _dbd_batch_id: str | None = None
+        if case_folder_id and not args.dry_run and files:
+            try:
+                from lib.drive_helpers import get_or_create_folder as _goc
+                _dbd_parent = _goc(DATA_BY_DATE_FOLDER, case_folder_id, drive_id=SHARED_DRIVE_ID)
+                _dbd_batch_id = _goc(time.strftime("%Y-%m-%d"), _dbd_parent, drive_id=SHARED_DRIVE_ID)
+            except Exception as _dbd_init_err:  # noqa: BLE001
+                log(f"Data by date folder init failed (bỏ qua): {_dbd_init_err}")
+
         for idx, (path, src_name) in enumerate(files, 1):
             log(f"[{idx}/{total}] {src_name}")
 
@@ -1195,7 +1364,8 @@ def main(argv=None) -> int:
                                              case_id=case_id, retries=args.retries, dry_run=args.dry_run,
                                              sop=sop, name_registry=name_registry,
                                              pages_text=seg_pages, gem_cache=seg_gem,
-                                             force_rescan=args.force_rescan)
+                                             force_rescan=args.force_rescan,
+                                             dbd_batch_id=_dbd_batch_id)
                             it["split_from"] = src_name
                             it["split_pages"] = seg_meta.get("pages", [])
                             if it.get("status") == "uploaded":
@@ -1212,7 +1382,7 @@ def main(argv=None) -> int:
                              case_id=case_id, retries=args.retries, dry_run=args.dry_run, sop=sop,
                              name_registry=name_registry, pages_text=ocr_cache.get(src_name),
                              gem_cache=vision_cache.get(src_name),
-                             force_rescan=args.force_rescan)
+                             force_rescan=args.force_rescan, dbd_batch_id=_dbd_batch_id)
             status = it.get("status", "?")
             log(f"     -> {status}  {it.get('new_name', '')}")
             items.append(it)
@@ -1319,6 +1489,23 @@ def main(argv=None) -> int:
                 log(f"checklist step failed (ignored): {type(e).__name__}: {e}")
                 traceback.print_exc()
                 manifest["checklist"] = {"ran": False, "error": f"{type(e).__name__}: {e}"}
+
+        # --- Wiki: tổng hợp tài liệu thành wiki khách hàng local (best-effort) ---
+        # Chỉ build khi có items thật (OCR batch) — không gọi Drive để build lại khi /check
+        _wiki_items = [it for it in items
+                       if it.get("status") in ("uploaded", "uploaded-split",
+                                               "uploaded-no-ocr", "duplicate",
+                                               "duplicate-by-hash")]
+        if not args.dry_run and case_folder_id and _wiki_items:
+            try:
+                from lib.wiki_builder import build_or_update_wiki
+                _wiki_path = build_or_update_wiki(
+                    _wiki_items, case_folder_id, applicant, visa
+                )
+                manifest["wiki_path"] = str(_wiki_path)
+                log(f"wiki: saved → {_wiki_path}")
+            except Exception as _wiki_err:  # noqa: BLE001
+                log(f"wiki build failed (ignored): {type(_wiki_err).__name__}: {_wiki_err}")
 
         man_path = (Path(args.manifest) if args.manifest
                     else (in_path.with_suffix(in_path.suffix + ".manifest.json") if in_path

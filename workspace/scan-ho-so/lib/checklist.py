@@ -84,6 +84,131 @@ _GROUP_LABEL = {
 
 _REQUIRED_TOTAL = sum(1 for _, _, nhom in REQUIRED_DOCS if nhom == "bat_buoc")  # = 18
 
+# ===========================================================================
+# Bảng checklist hiển thị A–H (format báo cáo mới)
+# ===========================================================================
+SECTION_NAMES = {
+    "A": "GIẤY TỜ TÙY THÂN",
+    "B": "PHÁP LÝ & CƯ TRÚ",
+    "C": "HỌC VẤN & NGHỀ NGHIỆP",
+    "D": "TÀI CHÍNH",
+    "E": "TÀI SẢN",
+    "F": "BẢO HIỂM & Y TẾ",
+    "G": "HỖ TRỢ NÔNG NGHIỆP (FARM)",
+    "H": "GIA ĐÌNH / LIÊN QUAN",
+}
+
+# 29 dòng hiển thị: (section, num, label, tags, severity, date_key)
+# date_key: key trong doc['key_fields'] hoặc doc['du_lieu'] để lấy ngày hiển thị.
+# severity đặc biệt:
+#   "hc_cu"         → HC cũ (Passport không phải mới nhất)
+#   "display_cha_me"→ CCCD cha/mẹ (quan_he in ['ba','me'])
+REPORT_DISPLAY_ROWS: list[tuple] = [
+    ("A",  1, "Hộ chiếu (còn hạn ≥2 năm)",                  ["Passport"],                   "bat_buoc",       "ngay_het_han"),
+    ("A",  2, "Hộ chiếu cũ (nếu có)",                        ["Passport"],                   "hc_cu",          "ngay_het_han"),
+    ("A",  3, "CCCD / CMND (2 mặt)",                         ["CCCD"],                       "bat_buoc",       None),
+    ("A",  4, "Giấy khai sinh",                               ["GKS"],                        "bat_buoc",       None),
+    ("A",  5, "Ảnh thẻ 5×7 (phông trắng, digital)",          ["Anh the"],                    "bat_buoc",       None),
+    ("A",  6, "Giấy đăng ký kết hôn / ly hôn",               ["GKH"],                        "ket_hon",        None),
+    ("A",  7, "Giấy khai sinh của con",                       ["GKS"],                        "co_con",         None),
+    ("B",  8, "Lý lịch tư pháp số 2 (≤6 tháng)",            ["LLTP"],                       "bat_buoc",       "ngay_cap"),
+    ("B",  9, "Xác nhận cư trú CT07",                        ["XNCT"],                       "bat_buoc",       "ngay_het_han"),
+    ("B", 10, "Bằng lái xe (nếu có)",                        ["GPLX"],                       "tuy_chon",       None),
+    ("C", 11, "Bằng cấp / chứng chỉ",                        ["Bang cap"],                   "bat_buoc",       None),
+    ("C", 12, "Chứng minh nghề nông (sổ đỏ NN / ĐKKD HTX)", ["So dat NN", "DKKD"],         "bat_buoc",       None),
+    ("C", 13, "Biên lai BHXH tự nguyện (3 tháng gần nhất)", ["BHXH"],                       "bat_buoc",       None),
+    ("C", 14, "Sơ yếu lý lịch / thông tin cá nhân & GĐ",   ["CV"],                         "bat_buoc",       None),
+    ("D", 15, "Sổ tiết kiệm (≥300–400tr, kỳ hạn ≥6 tháng)", ["STK"],                       "bat_buoc",       "ngay_dao_han"),
+    ("D", 16, "Sao kê ngân hàng (3–6 tháng gần nhất)",      ["Sao ke"],                     "bat_buoc",       "ngay_in"),
+    ("D", 17, "Xác nhận số dư (EN / song ngữ)",              ["XN so du"],                   "lam_sau",        "ngay_in"),
+    ("D", 18, "Thẻ Visa / Mastercard quốc tế (2 mặt)",      ["The Visa-MC"],                "bat_buoc",       None),
+    ("E", 19, "Sổ đỏ / GCN QSD đất",                        ["So dat", "HD cho-tang-thua ke"], "bat_buoc",    None),
+    ("E", 20, "HĐ cho-tặng-thừa kế (nếu có)",               ["HD cho-tang-thua ke"],        "tuy_chon",       None),
+    ("E", 21, "Cà vẹt xe / hoá đơn mua vàng",               ["Ca vet xe", "Vang"],          "tuy_chon",       None),
+    ("F", 22, "Biên lai BHYT (3 tháng gần nhất)",            ["BHYT"],                       "bat_buoc",       "ngay_het_han"),
+    ("F", 23, "Khám sức khoẻ IOM",                           ["IOM"],                        "lam_sau",        None),
+    ("G", 24, "Thông tin 2 đại lý nông sản / phân bón",     ["Dai ly NS"],                  "bat_buoc",       None),
+    ("G", 25, "Ảnh chụp gia đình",                           ["Anh gia dinh"],               "bat_buoc",       None),
+    ("G", 26, "Ảnh & video làm nông",                        ["Anh-video lam nong"],         "bat_buoc",       None),
+    ("G", 27, "Giấy công ích / bằng khen (nếu có)",         ["Bang khen"],                  "tuy_chon",       None),
+    ("H", 28, "CCCD / CMND cha, mẹ",                        ["CCCD"],                       "display_cha_me", None),
+    ("H", 29, "Giấy xác nhận con đang học",                  ["XN hoc"],                     "co_con",         None),
+]
+
+# ─── HTML color palette (matches PDF design) ───────────────────────────────
+_C = {
+    "primary": "#1B4F6A",
+    "sec_bg":  "#EBF5FB",
+    "ok_bg":   "#E8F5E9", "ok_fg":   "#1B5E20",
+    "miss_bg": "#FFEBEE", "miss_fg": "#B71C1C",
+    "warn_bg": "#FFF3E0", "warn_fg": "#E65100",
+    "chk_bg":  "#E3F2FD", "chk_fg":  "#0D47A1",
+    "na_fg":   "#9E9E9E",
+    "alt":     "#F8FAFB",
+    "bd":      "#D0D7DE",
+}
+
+_LEGEND_ITEMS = [
+    ("✓ Đã có",        _C["ok_fg"],   _C["ok_bg"],   "Không cần xử lý"),
+    ("✗ Chưa có",      _C["miss_fg"], _C["miss_bg"],  "Bổ sung / làm lại gấp"),
+    ("⚠ Hết hạn",      _C["warn_fg"], _C["warn_bg"],  "Gia hạn hoặc cấp lại"),
+    ("⏰ Sắp đáo hạn", _C["warn_fg"], "#FFF8E1",      "Theo dõi / nộp sớm"),
+    ("? Cần kiểm tra", _C["chk_fg"],  _C["chk_bg"],   "Đối chiếu bản gốc"),
+    ("—",              _C["na_fg"],   "#F5F5F5",      "Không áp dụng"),
+]
+
+
+def _e(s) -> str:
+    return html.escape(str(s or ""))
+
+
+def _td(content: str, style: str = "", colspan: int = 1) -> str:
+    cs = f' colspan="{colspan}"' if colspan > 1 else ""
+    return f'<td{cs} style="padding:4px 8px;border:1px solid {_C["bd"]};{style}">{content}</td>'
+
+
+def _status_td(status: str) -> str:
+    s = status.strip()
+    if s.startswith("✓"):
+        st = f"background:{_C['ok_bg']};color:{_C['ok_fg']}"
+    elif s.startswith("✗"):
+        st = f"background:{_C['miss_bg']};color:{_C['miss_fg']}"
+    elif s.startswith(("⚠", "⏰")):
+        st = f"background:{_C['warn_bg']};color:{_C['warn_fg']}"
+    elif s.startswith("?"):
+        st = f"background:{_C['chk_bg']};color:{_C['chk_fg']}"
+    else:
+        st = f"color:{_C['na_fg']};font-style:italic"
+    return (f'<td style="{st};font-weight:bold;text-align:center;'
+            f'padding:4px 8px;border:1px solid {_C["bd"]}">{_e(s)}</td>')
+
+
+def _html_to_text(h: str) -> str:
+    """Strip HTML tags → plain text cho LLM prompt (không dùng thư viện ngoài)."""
+    t = re.sub(r"<td[^>]*>", "\t", h)
+    t = re.sub(r"<tr[^>]*>", "\n", t)
+    t = re.sub(r"<th[^>]*>", "\t", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    t = t.replace("&middot;", "·").replace("&nbsp;", " ")
+    t = re.sub(r"\t+", " | ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
+def _legend_html() -> str:
+    cells = "".join(
+        f'<td style="background:{bg};padding:7px 4px;border:1px solid {_C["bd"]};'
+        f'text-align:center;width:16%">'
+        f'<div style="color:{fg};font-weight:bold;font-size:9pt">{_e(sym)}</div>'
+        f'<div style="color:#888;font-size:7.5pt">{_e(act)}</div>'
+        f'</td>'
+        for sym, fg, bg, act in _LEGEND_ITEMS
+    )
+    return (f'<table style="width:100%;border-collapse:collapse;margin:8px 0 12px 0;'
+            f'font-family:Arial,sans-serif">'
+            f'<tr>{cells}</tr></table>')
+
 
 # ---------------------------------------------------------------------------
 # danh sách 34 đơn vị hành chính cấp tỉnh (đọc từ data/provinces_34.json)
@@ -346,322 +471,416 @@ def _coverage_md_table(coverage: dict) -> str:
 
 
 # ===========================================================================
-# Prompt thẩm định (template — placeholder dạng {{...}} để tránh đụng dấu ngoặc trong markdown)
+# Helpers cho bảng checklist A–H (deterministic, không tốn LLM)
 # ===========================================================================
-CHECKLIST_PROMPT_TEMPLATE = """# VAI TRÒ
-Bạn là chuyên viên thẩm định hồ sơ visa/di trú cấp cao, chuyên kiểm tra tính
-chính xác và đồng nhất của hồ sơ xin Work Permit Canada (LMIA). Bạn có kinh
-nghiệm phát hiện sai lệch nhỏ nhất giữa các giấy tờ Việt Nam.
 
-# NGỮ CẢNH
-Tôi sẽ cung cấp cho bạn nội dung đã OCR từ bộ hồ sơ của khách hàng. Nhiệm vụ
-của bạn là rà soát TOÀN BỘ hồ sơ theo checklist bên dưới, đối chiếu chéo
-giữa các giấy tờ, và xuất báo cáo theo đúng format yêu cầu.
+def _fmt_date(val) -> str:
+    """Chuẩn hoá ngày về DD/MM/YYYY."""
+    if not val:
+        return ""
+    s = str(val).strip()
+    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", s):
+        return s
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    if m:
+        return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{2})$", s)
+    if m:
+        yy = int(m.group(3))
+        year = 2000 + yy if yy < 50 else 1900 + yy
+        return f"{m.group(1)}/{m.group(2)}/{year}"
+    return s
 
-# THÔNG TIN ĐẦU VÀO
+
+def _add_months_to_date(date_str: str, months: int) -> str:
+    """Cộng N tháng vào DD/MM/YYYY."""
+    try:
+        import calendar as _cal
+        d, m, y = map(int, date_str.split("/"))
+        m += months
+        while m > 12:
+            m -= 12
+            y += 1
+        d = min(d, _cal.monthrange(y, m)[1])
+        return f"{d:02d}/{m:02d}/{y}"
+    except Exception:
+        return ""
+
+
+def _find_by_tags(docs_by_tag: dict, tags) -> list:
+    """Trả tất cả docs có loai thuộc tags (không trùng tên file)."""
+    if isinstance(tags, str):
+        tags = [tags]
+    seen: set = set()
+    result = []
+    for t in tags:
+        for d in docs_by_tag.get(t, []):
+            n = d.get("ten", "")
+            if n not in seen:
+                seen.add(n)
+                result.append(d)
+    return result
+
+
+def _row_status(matching: list[dict], errors_by_tag: dict, tags: list, severity: str) -> str:
+    """Xác định ký hiệu trạng thái cho một dòng có docs."""
+    has_reject = any(
+        e.get("severity") == "reject"
+        for t in tags for e in errors_by_tag.get(t, [])
+    )
+    if has_reject:
+        return "⚠ Hết hạn"
+    if any(d.get("needs_review") for d in matching):
+        return "? Cần kiểm tra"
+    has_warn = any(
+        e.get("severity") == "warn"
+        for t in tags for e in errors_by_tag.get(t, [])
+    )
+    if has_warn:
+        return "⏰ Sắp đáo hạn"
+    return "✓ Đã có"
+
+
+def _format_date_for_row(docs: list[dict], date_key: str | None, row_num: int) -> str:
+    """Định dạng cột 'Hạn / ngày cấp' cho một dòng."""
+    if not date_key or not docs:
+        return ""
+    results = []
+    for doc in docs:
+        kf = doc.get("key_fields") or {}
+        ext = doc.get("du_lieu") or {}
+        raw = kf.get(date_key) or ext.get(date_key)
+        if not raw and date_key == "ngay_het_han":
+            raw = kf.get("han_su_dung") or kf.get("gia_tri_den") or ext.get("gia_tri_den")
+        if not raw and date_key == "ngay_in":
+            raw = kf.get("ngay_xac_nhan") or ext.get("ngay_xac_nhan")
+        date = _fmt_date(raw) if raw else ""
+        if not date:
+            continue
+        if date_key == "ngay_het_han":
+            results.append(f"HH {date}")
+        elif date_key == "ngay_cap" and row_num == 8:  # LLTP: hiển thị cấp + tính hết hạn 6 tháng
+            expiry = _add_months_to_date(date, 6)
+            s = f"Cấp {date}"
+            if expiry:
+                s += f"  ·  HH {expiry}"
+            results.append(s)
+        elif date_key == "ngay_dao_han":
+            prefix = (doc.get("ten") or "").split("-")[0].strip()
+            results.append(f"{prefix} đáo hạn {date}" if prefix else f"đáo hạn {date}")
+        elif date_key == "ngay_in":
+            results.append(f"In {date}")
+        else:
+            results.append(date)
+    return "  ·  ".join(results)
+
+
+def _format_ghi_chu_col(docs: list[dict]) -> str:
+    """Định dạng cột 'File / Ghi chú' từ danh sách docs."""
+    names = []
+    for doc in docs:
+        name = doc.get("ten", "")
+        if not name:
+            continue
+        kf = doc.get("key_fields") or {}
+        ext = doc.get("du_lieu") or {}
+        ident = (kf.get("so_passport") or kf.get("so_cccd") or kf.get("so_dinh_danh") or
+                 kf.get("so_the") or kf.get("so_so") or
+                 ext.get("so_passport") or ext.get("so_cccd") or ext.get("so_dinh_danh") or "")
+        names.append(f"{name} ({ident})" if ident else name)
+    return " + ".join(names)
+
+
+def _build_main_table(dataset: list[dict], coverage: dict, rule_errors: list[dict],
+                      today: str, has_marriage: bool, has_kids: bool) -> str:
+    """Build bảng checklist A–H dạng HTML (deterministic, không gọi LLM)."""
+    docs_by_tag: dict[str, list[dict]] = {}
+    for d in dataset:
+        t = d.get("loai") or ""
+        if t:
+            docs_by_tag.setdefault(t, []).append(d)
+
+    errors_by_tag: dict[str, list[dict]] = {}
+    for e in (rule_errors or []):
+        t = e.get("tag") or ""
+        if t:
+            errors_by_tag.setdefault(t, []).append(e)
+
+    matched_files: set[str] = set()
+    _CELL = f"padding:4px 8px;border:1px solid {_C['bd']};font-family:Arial,sans-serif;font-size:9pt"
+    _HDR  = f"background:{_C['primary']};color:#fff;font-weight:bold;{_CELL}"
+    _SEC  = f"background:{_C['sec_bg']};color:{_C['primary']};font-weight:bold;{_CELL}"
+    _NUM  = f"text-align:center;color:#555;{_CELL}"
+    _GHI  = f"color:#444;font-size:8.5pt;{_CELL}"
+    _DATE = f"color:#333;font-size:8.5pt;{_CELL}"
+    _LABEL = f"color:#222;{_CELL}"
+
+    rows: list[str] = []
+    # Header row
+    rows.append(
+        f'<tr>'
+        f'<th style="{_HDR};width:3%;text-align:center">#</th>'
+        f'<th style="{_HDR};width:28%">Mục hồ sơ</th>'
+        f'<th style="{_HDR};width:13%;text-align:center">Trạng thái</th>'
+        f'<th style="{_HDR};width:17%">Hạn / ngày cấp</th>'
+        f'<th style="{_HDR}">File / Ghi chú</th>'
+        f'</tr>'
+    )
+    current_section = None
+
+    for row_idx, row in enumerate(REPORT_DISPLAY_ROWS):
+        sec, num, label, tags, severity, date_key = row
+        if sec != current_section:
+            current_section = sec
+            sec_name = f"{sec} — {SECTION_NAMES.get(sec, sec)}"
+            rows.append(
+                f'<tr><td colspan="5" style="{_SEC}">{_e(sec_name)}</td></tr>'
+            )
+
+        ghi_chu_note = ""
+        matching: list[dict] = []
+
+        if severity == "hc_cu":
+            passports = sorted(docs_by_tag.get("Passport", []),
+                               key=lambda d: (d.get("key_fields") or {}).get("ngay_cap", "") or "",
+                               reverse=True)
+            if len(passports) < 2:
+                status_label = "—"
+                ghi_chu_note = "Không có HC cũ"
+            else:
+                matching = passports[1:]
+                status_label = _row_status(matching, errors_by_tag, ["Passport"], "tuy_chon")
+
+        elif severity == "display_cha_me":
+            matching = [d for d in docs_by_tag.get("CCCD", []) if d.get("quan_he") in ("ba", "me")]
+            if not matching:
+                status_label = "? Cần kiểm tra"
+                ghi_chu_note = "Chưa scan CCCD cha/mẹ — đối chiếu bản gốc"
+            else:
+                status_label = _row_status(matching, errors_by_tag, ["CCCD"], "bat_buoc")
+
+        elif severity == "ket_hon" and not has_marriage:
+            status_label = "—"
+            ghi_chu_note = "Không áp dụng"
+
+        elif severity == "co_con" and not has_kids:
+            status_label = "—"
+            ghi_chu_note = "Không áp dụng"
+
+        elif severity == "lam_sau":
+            matching = _find_by_tags(docs_by_tag, tags)
+            if matching:
+                status_label = _row_status(matching, errors_by_tag, list(tags), severity)
+            else:
+                status_label = "—"
+                ghi_chu_note = "Sẽ làm sau"
+
+        elif num == 1:  # HC mới: chỉ lấy passport mới nhất
+            passports = sorted(docs_by_tag.get("Passport", []),
+                               key=lambda d: (d.get("key_fields") or {}).get("ngay_cap", "") or "",
+                               reverse=True)
+            matching = passports[:1]
+            status_label = (_row_status(matching, errors_by_tag, ["Passport"], severity)
+                            if matching else "✗ Chưa có")
+            if not matching:
+                ghi_chu_note = "CHƯA CÓ — cần bổ sung gấp"
+
+        elif num == 3:  # CCCD đương đơn (không phải cha/mẹ)
+            matching = [d for d in docs_by_tag.get("CCCD", [])
+                        if d.get("quan_he") not in ("ba", "me")]
+            status_label = (_row_status(matching, errors_by_tag, ["CCCD"], severity)
+                            if matching else "✗ Chưa có")
+            if not matching:
+                ghi_chu_note = "CHƯA CÓ — cần bổ sung gấp"
+
+        elif num == 7:  # GKS con: GKS thứ 2 trở đi
+            all_gks = docs_by_tag.get("GKS", [])
+            matching = all_gks[1:] if len(all_gks) >= 2 else []
+            if not matching and has_kids:
+                status_label = "✗ Chưa có"
+                ghi_chu_note = "CHƯA CÓ — cần bổ sung gấp"
+            elif not matching:
+                status_label = "—"
+                ghi_chu_note = "Không áp dụng"
+            else:
+                status_label = _row_status(matching, errors_by_tag, ["GKS"], severity)
+
+        elif num == 19:  # Sổ đỏ: chỉ tag So dat; HD cho-tang-thua ke ở row 20
+            so_dat = docs_by_tag.get("So dat", [])
+            hd = docs_by_tag.get("HD cho-tang-thua ke", [])
+            matching = so_dat  # row 19 hiển thị So dat
+            combined_ok = bool(so_dat or hd)  # FARM-11-12: either satisfies
+            if combined_ok:
+                status_label = _row_status(matching if matching else hd,
+                                           errors_by_tag, ["So dat", "HD cho-tang-thua ke"], severity)
+            else:
+                status_label = "✗ Chưa có"
+                ghi_chu_note = "CHƯA CÓ — cần bổ sung gấp"
+
+        else:
+            tag_list = list(tags) if not isinstance(tags, str) else [tags]
+            matching = _find_by_tags(docs_by_tag, tag_list)
+            if not matching:
+                if severity == "bat_buoc":
+                    status_label = "✗ Chưa có"
+                    ghi_chu_note = "CHƯA CÓ — cần bổ sung gấp"
+                elif severity == "ket_hon":
+                    status_label = "—"
+                    ghi_chu_note = "CHƯA CÓ" if has_marriage else "Không áp dụng"
+                else:
+                    status_label = "—"
+                    ghi_chu_note = "Tùy chọn"
+            else:
+                tag_list_e = list(tags) if not isinstance(tags, str) else [tags]
+                status_label = _row_status(matching, errors_by_tag, tag_list_e, severity)
+
+        for d in matching:
+            matched_files.add(d.get("ten", ""))
+
+        date_str = _format_date_for_row(matching, date_key, num)
+        ghi_chu = ghi_chu_note if ghi_chu_note else _format_ghi_chu_col(matching)
+        row_bg = _C["alt"] if row_idx % 2 == 0 else "#fff"
+        rows.append(
+            f'<tr style="background:{row_bg}">'
+            f'<td style="{_NUM}">{num}</td>'
+            f'<td style="{_LABEL}">{_e(label)}</td>'
+            + _status_td(status_label)
+            + f'<td style="{_DATE}">{_e(date_str)}</td>'
+            f'<td style="{_GHI}">{_e(ghi_chu)}</td>'
+            f'</tr>'
+        )
+
+    # TÀI LIỆU BỔ SUNG: files không khớp bất kỳ dòng nào
+    unmatched = [d for d in dataset if d.get("ten", "") not in matched_files]
+    if unmatched:
+        rows.append(
+            f'<tr><td colspan="5" style="{_SEC}">TÀI LIỆU BỔ SUNG (ngoài checklist chuẩn)</td></tr>'
+        )
+        for d in unmatched:
+            rows.append(
+                f'<tr>'
+                f'<td style="{_NUM}">*</td>'
+                f'<td style="{_LABEL}">{_e(d.get("ten", ""))}</td>'
+                + _status_td("✓ Đã có")
+                + f'<td style="{_DATE}">—</td>'
+                f'<td style="{_GHI};font-style:italic;color:{_C["na_fg"]}">(ngoài checklist chuẩn)</td>'
+                f'</tr>'
+            )
+
+    inner = "\n".join(rows)
+    return (
+        f'<table style="width:100%;border-collapse:collapse;'
+        f'font-family:Arial,sans-serif;font-size:9pt;margin-bottom:16px">'
+        f'{inner}</table>'
+    )
+
+
+# ===========================================================================
+# Prompt thẩm định — chỉ sinh phần NHẬN XÉT (thay thế báo cáo 4 phần cũ)
+# ===========================================================================
+NHAN_XET_PROMPT = """# VAI TRÒ
+Chuyên viên thẩm định hồ sơ visa Canada (LMIA) của Đồng Hành — kinh nghiệm
+phát hiện sai lệch nhỏ nhất giữa các giấy tờ Việt Nam.
+
+# NHIỆM VỤ
+Bot đã build sẵn bảng checklist A–H (xem {{CHECKLIST_TABLE}} ở dưới).
+Dựa trên hồ sơ OCR + bảng đó, CHỈ viết phần NHẬN XÉT HỒ SƠ theo format cuối prompt.
+KHÔNG tạo lại bảng. KHÔNG thêm phần khác ngoài NHẬN XÉT.
+
+# DỮ LIỆU
 - Ngày kiểm tra: {{TODAY}}
-- Tên khách hàng: {{APPLICANT}}
-- Nội dung OCR hồ sơ: cung cấp ở message tiếp theo dưới dạng JSON — mỗi phần tử là một giấy tờ với
-  `ten` (tên file đã chuẩn hoá), `loai` (mã loại giấy tờ), `nguoi` (người trên giấy),
-  `quan_he` (quan hệ của `nguoi` với đương đơn: "me"=mẹ đương đơn, "ba"=bố, "con"=con, "vo"=vợ, "chong"=chồng, ""=chính đương đơn),
-  `tom_tat`, `du_lieu` (các trường trích từ OCR), `key_fields`, `confidence` ("high"|"medium"|"low"),
-  `needs_review` (true ⇒ scan mờ / viết tay / phân loại chưa chắc — KHÔNG dùng giấy đó làm chuẩn để bắt lỗi giấy khác).
-  Nếu `du_lieu` trống nhưng `tom_tat` có OCR chi tiết thì PHẢI dùng `tom_tat` làm nguồn dữ liệu; tuyệt đối không kết luận file mờ chỉ vì thiếu structured fields.
+- Khách hàng: {{APPLICANT}}
+- Điểm danh: {{HAVE}}/{{REQUIRED}} mục bắt buộc. {{MISSING_NOTE}}
+- Địa giới hành chính hiện hành (ground-truth): {{PROVINCES}}
 
-# NGUYÊN TẮC LÀM VIỆC BẮT BUỘC
+Bảng checklist (deterministic — đã tính sẵn, COI LÀ ĐÚNG):
+{{CHECKLIST_TABLE}}
 
-1. **KHÔNG SUY ĐOÁN**: Chỉ kết luận dựa trên dữ liệu OCR có thật. Nếu OCR mờ/
-   thiếu/không rõ → ghi "KHÔNG ĐỌC ĐƯỢC - cần kiểm tra bản gốc".
-   **CẤM hallucination về chất lượng scan**: chỉ được nói "scan mờ/OCR không đọc được" khi `needs_review=true`, `confidence`="low", hoặc `tom_tat` quá ngắn/không có dữ liệu. Nếu `confidence`="high", `needs_review=false` và `tom_tat` có nội dung đọc được thì coi OCR dùng được; nếu `du_lieu` thiếu, ghi "chưa bóc được trường cấu trúc" chứ KHÔNG đổ lỗi file mờ.
+Lỗi bot phát hiện (deterministic, COI LÀ ĐÚNG — phải đưa vào ! bullets):
+{{DETERMINISTIC_ERRORS}}
 
-2. **ĐỐI CHIẾU CHÉO TRIỆT ĐỂ**: Mọi thông tin trùng lặp giữa các giấy tờ
-   (họ tên, ngày sinh, số CMND/CCCD, địa chỉ, tên cha mẹ...) phải được so
-   khớp ký tự với ký tự. Một dấu cách thừa, một chữ lót thiếu = LỖI.
-   — **TRỪ KHI** một bên là giấy `needs_review=true` / `confidence`="low" / tờ TỰ KHAI / viết tay (`loai`="CV", biểu
-   mẫu khách tự ghi): khác biệt nhỏ kiểu đó nhiều khả năng chỉ là OCR đọc sai chữ viết tay → ghi 🟢/🟡 "OCR thấp tin
-   cậy — cần đối chiếu bản gốc", **KHÔNG phải lỗi 🔴**. Một tờ TỰ KHAI / viết tay KHÔNG phải CCCD / giấy chính thức kể
-   cả khi nó có ghi số CCCD — đừng dùng nó làm chuẩn để bắt lỗi giấy khác.
-   — **QUAN TRỌNG với bằng cấp / giấy tờ chữ viết tay**: nhiều bằng cấp cũ (bằng cấp 2, chứng chỉ xưa) viết tay hoặc
-   OCR kém → `needs_review=true`. Với các file này, **TUYỆT ĐỐI KHÔNG báo 🔴** do "tên không khớp" / "địa chỉ không khớp"
-   / "nghi vấn" — chỉ ghi 🟡 "OCR thấp tin cậy — cần kiểm tra bản gốc" kèm tên file. KHÔNG suy diễn mâu thuẫn từ
-   dữ liệu OCR mờ.
-
-5. **TRƯỜNG `quan_he`**: Mỗi file có `quan_he` cho biết người trên giấy là ai trong hồ sơ. Khi kiểm tra thông tin
-   cha/mẹ trên CCCD/khai sinh/LLTP đương đơn, đối chiếu với `nguoi` của file có `quan_he`="ba"/"me" (bằng tên người
-   trên giấy đó). Ví dụ: "CCCD me-Mai Lan.pdf" có `quan_he`="me" → `nguoi` trên file này = tên mẹ đương đơn → kiểm tra
-   tên mẹ trên CCCD/khai sinh đương đơn có khớp không; nếu khớp → ghi ✅; nếu lệch → 🟡 hoặc 🔴 tùy mức độ.
-
-3. **TÍNH TOÁN NGÀY THÁNG**: Mọi thời hạn phải tính từ ngày kiểm tra ở trên.
-   Hiển thị rõ phép tính (VD: "Cấp 22/01/2026, đến {{TODAY}} = 3 tháng 20
-   ngày, còn hạn 2 tháng 10 ngày").
-
-4. **CẢNH BÁO ĐỊA GIỚI HÀNH CHÍNH (cải cách 2025)**: Từ 12/06/2025 chỉ còn 34 đơn vị
-   cấp tỉnh (28 tỉnh + 6 TP trực thuộc TW); từ 01/07/2025 các xã/phường cũng đã sáp nhập (≈10.000 → 3.321).
-   - Hồ sơ có sẵn trường **`_dia_gioi`** = KẾT QUẢ TRA CỨU DETERMINISTIC từ bảng địa giới chính thức (cũ↔mới,
-     tới cấp xã). **COI ĐÓ LÀ GROUND-TRUTH — KHÔNG tự dò lại, KHÔNG đoán.** Cách dùng:
-     (a) hai địa chỉ TEXT khác nhau nhưng `_dia_gioi.doi_chieu` ghi `same` (hoặc cùng `don_vi_moi`) → **KHÔNG báo
-         mâu thuẫn** trong PHẦN 3 (chỉ là tên trước/sau cải cách);
-     (b) giấy cấp SAU mốc cải cách mà ghi đơn vị `la_ten_cu=true` (đã sáp nhập) → BÁO LỖI ở PHẦN 3;
-     (c) giấy cấp TRƯỚC mốc đó → HỢP LỆ, ghi chú "đã sáp nhập thành …";
-     (d) `do_tin`=`unknown`/`fuzzy` (bảng chưa phủ hết / chuỗi mờ) → tự đánh giá thêm như bình thường.
-     (Nếu hồ sơ KHÔNG có `_dia_gioi` thì tự kiểm dựa trên danh sách dưới như trước.)
-   Danh sách 34 đơn vị cấp tỉnh hiện hành:
-   {{PROVINCES}}
-
-# QUY TRÌNH KIỂM TRA (Thực hiện tuần tự, không bỏ bước)
-
-Bộ hồ sơ FARM của ALLY gồm 26 mục, trong đó 18 mục BẮT BUỘC — bảng điểm danh chi tiết từng mục (đã có /
-THIẾU / không áp dụng / tùy chọn / làm sau) ở phần "THAM KHẢO" bên dưới. Mục BẮT BUỘC nào (đang áp dụng)
-chưa có → ghi vào PHẦN 3 dạng "THIẾU: [tên mục]".
-
-## BƯỚC 1: Liệt kê inventory
-Liệt kê tất cả giấy tờ phát hiện trong hồ sơ OCR, đánh số thứ tự.
-
-## BƯỚC 2: Trích xuất dữ liệu chuẩn
-Tạo một "Bảng dữ liệu gốc" tổng hợp các trường thông tin then chốt từ TẤT CẢ
-giấy tờ, dạng:
-
-| Trường | Hộ chiếu | CCCD | Khai sinh | LLTP | CT07 | Kết hôn | KS con |
-|--------|----------|------|-----------|------|------|---------|--------|
-| Họ tên | ... | ... | ... | ... | ... | ... | ... |
-| Ngày sinh | ... | ... | ... | ... | ... | ... | ... |
-| Số CMND/CCCD | ... | ... | ... | ... | ... | ... | ... |
-| Địa chỉ TT | ... | ... | ... | ... | ... | ... | ... |
-| Tên cha | ... | ... | ... | ... | ... | ... | ... |
-| Tên mẹ | ... | ... | ... | ... | ... | ... | ... |
-
-## BƯỚC 3: Kiểm tra từng giấy tờ theo checklist chi tiết
-
-### A. GIẤY TỜ CÁ NHÂN
-
-**A1. Hộ chiếu:**
-- [ ] Đã scan đủ MỌI trang có thông tin/dấu/visa của cả hộ chiếu cũ (nếu có) lẫn hộ chiếu mới?
-- [ ] Họ tên không dấu khớp 100% với CCCD/Khai sinh
-- [ ] Ngày sinh, giới tính khớp tuyệt đối
-- [ ] Nơi sinh (tỉnh) khớp với Khai sinh
-- [ ] Số CMND/CCCD ghi trong HC: số 9 cũ hay 12 mới — chỉ GHI NHẬN (lịch sử chuyển đổi giấy tờ), KHÔNG phải lỗi
-- [ ] Còn hạn ≥ 2 năm tính từ ngày dự kiến sử dụng?
-- [ ] Hình ảnh/chữ ký không tẩy xóa
-
-**A2. CCCD:**
-- [ ] Số định danh đủ 12 số
-- [ ] Toàn bộ thông tin cá nhân khớp HC + Khai sinh
-- [ ] Ghi nhận Quê quán + Nơi thường trú để đối chiếu CT07/LLTP
-- [ ] Còn hạn (lưu ý mốc đổi thẻ: 25, 40, 60 tuổi)
-
-**A3. Khai sinh khách hàng:**
-- [ ] Họ tên, ngày sinh, cha mẹ ruột khớp tất cả giấy tờ khác
-
-**A4. Lý lịch tư pháp (LLTP):**
-- [ ] Còn hạn 6 tháng tính từ ngày cấp đến NGÀY KIỂM TRA
-- [ ] Số CMND/CCCD trên LLTP: nếu là số 9 cũ (LLTP cấp đã lâu) thì bình thường — KHÔNG yêu cầu giải trình
-- [ ] Tên cha, mẹ, vợ/chồng khớp Khai sinh + Đăng ký kết hôn
-- [ ] Tình trạng: "Không có án tích"
-
-**A5. Xác nhận cư trú CT07:**
-- [ ] Còn hiệu lực ("Giấy này có giá trị đến hết ngày...")
-- [ ] Địa chỉ thường trú + nơi ở hiện tại khớp CCCD/LLTP (áp dụng quy tắc địa giới ở mục 4 — tên cũ↔mới của CÙNG MỘT
-  nơi KHÔNG phải mâu thuẫn)
-- [ ] Đương đơn là NGƯỜI YÊU CẦU / người khai (ghi ở phần đầu giấy). Bảng "Các thành viên khác trong hộ gia đình" chỉ
-  liệt kê những NGƯỜI KHÁC trong hộ — **KHÔNG có tên đương đơn trong bảng đó là BÌNH THƯỜNG**, KHÔNG phải lỗi, KHÔNG
-  làm giấy "vô giá trị". Chỉ kiểm: mã định danh 12 số + ngày sinh từng người TRONG BẢNG có khớp CCCD/KS của họ không.
-- [ ] CHỦ HỘ có thể là bố/mẹ ruột, bố/mẹ chồng (vợ), anh/chị/em, hoặc chính vợ/chồng đương đơn — **đừng mặc định chủ
-  hộ là vợ/chồng của đương đơn**, và đừng báo "mâu thuẫn tên chồng/vợ" chỉ vì tên chủ hộ khác tên vợ/chồng ghi trên
-  giấy khác. Chỉ báo mâu thuẫn vợ/chồng khi MỘT trường ghi RÕ "vợ/chồng" (trên LLTP, ĐKKH, CCCD…) xung đột với một
-  trường ghi RÕ "vợ/chồng" khác.
-
-**A6. Đăng ký kết hôn (nếu có):**
-- [ ] Họ tên, ngày sinh vợ/chồng khớp 100% giấy tờ tùy thân
-- [ ] Số CMND trên giấy này (thường là số cũ 9 số) → ghi nhận lịch sử
-- [ ] Đủ chữ ký 2 vợ chồng + dấu cơ quan cấp
-
-**A7. Khai sinh con cái:**
-- [ ] Họ tên, ngày sinh con khớp bảng CT07
-- [ ] Họ tên + năm sinh cha mẹ trên KS con = trên ĐKKH + CCCD khách hàng
-- [ ] Người đi khai sinh: nếu là ông/bà → tên có khớp KS gốc của khách hàng?
-
-**A8. Ảnh thẻ (hình thẻ):**
-- [ ] Có ảnh thẻ trong hồ sơ? (tag=Anh the) — nếu thiếu → ghi vào PHẦN 3 "THIẾU: Ảnh thẻ"
-- [ ] Kiểm tra photo_flags từ `du_lieu` (bot tự động phân tích ảnh — COI LÀ ĐÁNG TIN CẬY):
-  - `la_mat_moc=false` → 🟡 [8.2a] có trang điểm — yêu cầu chụp lại mặt mộc
-  - `co_trang_suc=true` → 🟡 [8.2b] đeo trang sức — yêu cầu tháo và chụp lại
-  - `co_xam_lo=true` → 🟡 [8.2c] lộ hình xăm — yêu cầu che và chụp lại
-  - `toc_toi_mau=false` → 🟡 [8.2d] tóc sáng màu — yêu cầu nhuộm tối và chụp lại
-  - `phong_nen_trang=false` → 🟡 [8.2e] phông không trắng — yêu cầu chụp lại với phông trắng
-  - Tất cả flags đều đạt (true/false đúng yêu cầu) → ghi ✅ PHẦN 1 "Ảnh thẻ đạt tiêu chuẩn"
-- [ ] Nếu photo_flags null/trống → 🟢 "Bot chưa phân tích được ảnh — cần kiểm tra thủ công tiêu chuẩn 5×7, phông trắng, mặt mộc"
-
-### B. GIẤY TỜ TÀI CHÍNH & BẢO HIỂM
-
-**B1. Sổ tiết kiệm:**
-- [ ] Chủ sổ khớp CCCD/HC
-- [ ] Số tiền gốc ≥ ~300–400 triệu? Kỳ hạn ≥ 6 tháng? Số dư nên KHÔNG tròn (vd 301/315/390tr) — báo nếu không đạt
-- [ ] Đã đáo hạn chưa? Đang phong tỏa/duy trì?
-- [ ] Đủ mộc đỏ + chữ ký giao dịch viên
-
-**B2. Xác nhận số dư:**
-- [ ] Ngày in xác nhận ≤ 30 ngày tính từ ngày kiểm tra
-- [ ] Số TK + số dư khớp sổ tiết kiệm/sao kê
-- [ ] Bản gốc có mộc đỏ hay chỉ in điện tử?
-
-**B3. Biên lai BHXH (tự nguyện):**
-- [ ] Tên + Số sổ/Mã BHXH khớp khách hàng
-- [ ] Mức đóng ~200k/tháng? Có đủ 3 tháng gần nhất? (yêu cầu duy trì đóng 3 tháng/lần) — báo nếu thiếu/ngắt quãng
-- [ ] Có dấu đỏ + chữ ký người thu/nộp tiền? Biên lai hợp lệ?
-
-**B4. Biên lai BHYT:**
-- [ ] Tên + Mã thẻ
-- [ ] Còn hiệu lực tính đến ngày kiểm tra
-
-**B5. Sao kê ngân hàng:**
-- [ ] Chủ TK + số TK khớp
-- [ ] Đủ 3-6 tháng gần nhất, không thiếu tháng
-- [ ] Đóng dấu giáp lai + mộc đỏ trang cuối
-- [ ] Số dư cuối kỳ khớp xác nhận số dư
-
-## BƯỚC 4: Rà soát trường hợp đặc biệt (BẮT BUỘC)
-
-1. **Số định danh cũ (9 số) và CCCD mới (12 số)**: hồ sơ có thể có cả hai (giấy cũ ghi số 9, giấy mới ghi số 12) — đây
-   là chuyện BÌNH THƯỜNG của quá trình chuyển đổi giấy tờ, **KHÔNG báo lỗi, KHÔNG yêu cầu khách bổ sung giấy xác nhận**.
-   (Chỉ lưu ý nếu trên CÙNG một giấy hiện hành lại có hai số khác nhau không ăn khớp — hiếm.)
-
-2. **Sai lệch địa chỉ giữa giấy cũ và mới**: dùng `_dia_gioi` (mục 4) — tên TRƯỚC vs SAU cải cách của CÙNG MỘT nơi
-   KHÔNG phải lỗi; chỉ báo nếu giấy cấp SAU mốc cải cách còn ghi đơn vị đã sáp nhập.
-
-3. **Chữ lót/tên gọi**: sai khác giữa các GIẤY CHÍNH THỨC (CCCD, hộ chiếu, khai sinh, LLTP, CT07, ĐKKH) → BÁO LỖI;
-   nhưng nếu một bên là giấy `needs_review`/tự khai/viết tay → chỉ 🟢/🟡 "cần đối chiếu bản gốc" (xem mục 2 NGUYÊN TẮC).
-
-4. **Tên công ty trên BHXH ↔ Sao kê lương**: PHẢI trùng khớp tuyệt đối.
-
-5. **Địa giới hành chính sau 12/06/2025 (tỉnh) / 01/07/2025 (xã/phường)**: đối chiếu `_dia_gioi` / danh sách 34 đơn vị mới.
-
-6. **Thẻ ngân hàng KHÔNG phải bằng chứng tài sản**: thẻ tín dụng, thẻ ghi nợ, thẻ Visa/Mastercard/JCB của ngân hàng
-   (VCB, BIDV, TCB, ACB…) **KHÔNG được chấp nhận** thay cho sổ tiết kiệm (`loai`="STK") hay sao kê (`loai`="Sao ke").
-   Nếu phát hiện bất kỳ file nào thực chất là ảnh thẻ ngân hàng (ghi số thẻ 16 số, thương hiệu Visa/MC, ngày hết hạn
-   dạng MM/YY) → báo **🔴 LỖI NGHIÊM TRỌNG** tại PHẦN 3: "Thẻ ngân hàng không phải giấy tờ chứng minh tài chính hợp lệ
-   theo FARM — yêu cầu sổ tiết kiệm gốc hoặc sao kê tài khoản có dấu đỏ". **Phần PHẦN 1 KHÔNG được liệt kê file thẻ
-   ngân hàng là "chuẩn xác".**
-
-7. **VISION COMPARE (Mức 3)**: phần `_vision_compare` (nếu có) là kết quả gemini-2.5-pro SO SÁNH ảnh chân
-   dung trên ảnh thẻ với ảnh trên hộ chiếu / GPLX / CCCD — COI LÀ GROUND-TRUTH, KHÔNG tự dò lại.
-   - `same_person`=false (confidence=high) → **🔴 LỖI NGHIÊM TRỌNG**: 2 ảnh KHÁC NGƯỜI → ghi rule code `[8.3+]`
-     vào PHẦN 3, đề xuất kiểm tra hồ sơ khẩn cấp.
-   - `phau_thuat_signs` non-empty → **🔴 [1.2]**: nghi phẫu thuật thẩm mỹ — báo người phụ trách kèm danh sách
-     bộ phận nghi vấn (lấy từ field).
-   - `same_person`=true AND `age_diff_months` > 6 → **🟡 [8.3]**: ảnh thẻ trùng ảnh trên giấy khác cách quá
-     6 tháng → yêu cầu ảnh thẻ mới hơn.
-   - `anomalies` non-empty → ghi vào PHẦN 3 với mức độ phù hợp.
-   - `confidence`=low → đề xuất "cần đối chiếu thủ công bản gốc", KHÔNG báo lỗi cứng.
-
-# THAM KHẢO — ĐIỂM DANH HỒ SƠ THEO CHECKLIST FARM (ALLY)
-(đếm tự động từ dữ liệu OCR, coi là CHUẨN — KHÔNG được mâu thuẫn; trạng thái mỗi mục: "✅ đã có" /
-"❌ THIẾU" / "— không áp dụng" / "— chưa có (tùy chọn)" / "— sẽ làm sau"):
-{{COVERAGE_BLOCK}}
-→ Khách đã nộp {{HAVE}}/{{REQUIRED}} mục BẮT BUỘC trong CHECKLIST HỒ SƠ FARM. {{MISSING_NOTE}}
-Mục đánh dấu "— không áp dụng" / "— tùy chọn" / "— sẽ làm sau" thì ĐỪNG liệt kê là "thiếu" trong PHẦN 3.
-
-# THAM KHẢO — DANH SÁCH RULE KIỂM TRA GIẤY TỜ (theo HƯỚNG DẪN CHECK HỒ SƠ v1.1)
-Mỗi rule có MÃ CODE (vd `13.3`, `19.4`). Khi báo lỗi ở PHẦN 3, ghi rõ code: "Lỗi #N [13.3]: …".
-🔴 = reject (giấy KHÔNG dùng được, BÁO ngay) · 🟡 = warn (cần làm rõ) · 🟢 = info (ghi nhận / nhắc)
-Áp dụng đúng `áp dụng:` của mỗi rule — KHÔNG áp dụng rule lên giấy không thuộc tag đó.
-
+Rule tham chiếu:
 {{RULES_BLOCK}}
 
-{{DETERMINISTIC_ERRORS}}
+# NGUYÊN TẮC BẮT BUỘC
+
+1. **KHÔNG hallucinate**: chỉ kết luận từ dữ liệu OCR thật. `needs_review=true`/`confidence=low` → chỉ
+   ghi "? cần kiểm tra bản gốc", KHÔNG kết luận lỗi cứng.
+   CẤM nói "scan mờ" khi `confidence=high` và `tom_tat` có nội dung đọc được.
+2. **Đối chiếu chéo**: họ tên, ngày sinh, số CCCD, cha mẹ/vợ chồng trên mọi giấy chính thức phải
+   khớp ký tự với ký tự. Giấy `needs_review=true`/tự khai (`loai=CV`)/viết tay → KHÔNG dùng làm chuẩn
+   để bắt lỗi giấy chính thức khác.
+3. **Địa giới 2025**: Từ 12/06/2025 chỉ còn 34 đơn vị cấp tỉnh; từ 01/07/2025 xã/phường đã sáp nhập.
+   Dùng `_dia_gioi` (nếu có trong hồ sơ JSON) làm ground-truth — tên cũ↔mới CÙNG nơi = KHÔNG mâu thuẫn.
+   Giấy cấp SAU mốc mà ghi tên đơn vị đã sáp nhập → BÁO trong ! bullet.
+4. **Vision compare** (`_vision_compare`): `same_person=false` (confidence=high) → ! nghiêm trọng;
+   `age_diff_months>6` → ! cần ảnh mới. Coi là ground-truth.
+5. **Photo flags** (ảnh thẻ — `du_lieu.photo_flags`): `la_mat_moc/co_trang_suc/co_xam_lo/toc_toi_mau/
+   phong_nen_trang` — báo ! nếu không đạt tiêu chuẩn.
+6. **Lỗi deterministic** ({{DETERMINISTIC_ERRORS}}): BẮT BUỘC đưa vào ! bullets, KHÔNG bỏ qua.
+7. **Mục bắt buộc thiếu** (từ bảng): liệt kê trong ✗ bullet, đủ tên.
+8. **Số CCCD cũ (9 số) vs mới (12 số)**: chuyển đổi lịch sử → BÌNH THƯỜNG, KHÔNG báo lỗi.
+9. **Sổ đất cùng chủ sở hữu**: nếu có ≥2 sổ đất cùng tên chủ → đối chiếu năm sinh và số CMND/CCCD
+   của từng chủ giữa các sổ. Nếu lệch → báo "! cần đối chiếu bản gốc: thông tin chủ sở hữu
+   không nhất quán giữa các sổ đất (năm sinh/số CMND/CCCD khác nhau)".
 
 # FORMAT ĐẦU RA BẮT BUỘC
 
-Xuất kết quả theo đúng 4 phần dưới đây, không thêm bớt, viết bằng tiếng Việt như một chuyên viên
-thẩm định viết tay — câu văn tự nhiên, đủ ý, dùng được ngay cho nhân viên gửi khách:
+Chỉ xuất đúng khối dưới đây (kể cả dấu ---), không thêm gì khác:
 
 ---
 
-## 📋 BÁO CÁO THẨM ĐỊNH HỒ SƠ
-**Khách hàng:** {{APPLICANT}}
-**Ngày kiểm tra:** {{TODAY}}
-**Tổng số giấy tờ rà soát:** [số]
+## 📋 NHẬN XÉT HỒ SƠ & ƯU TIÊN BỔ SUNG
+
+Nhận xét tổng thể
+[1 dòng: "Sẵn sàng nộp — hồ sơ đầy đủ" HOẶC "Cần bổ sung trước khi nộp — còn X mục bắt buộc chưa có" HOẶC "Cần xử lý gấp — có lỗi nghiêm trọng"]
+
+✓  [điểm mạnh 1 — nêu cụ thể (giấy tờ nào, số tiền, diện tích…)]
+✓  [điểm mạnh 2]
+!  [cảnh báo 1 — kèm tên file, số liệu cụ thể, hành động đề xuất]
+!  [cảnh báo 2 (nếu có)]
+✗  [X mục FARM bắt buộc chưa có: tên mục 1, tên mục 2, ...]  ← chỉ xuất dòng này nếu có mục thiếu
+
+   Ưu tiên bổ sung
+1.  [Tên mục / hành động]  —  [hướng dẫn cụ thể (tên giấy cần nộp, yêu cầu đặc biệt)]
+2.  [...]
+(liệt kê TẤT CẢ mục cần làm theo thứ tự ưu tiên — từ bắt buộc thiếu đến cảnh báo cần xử lý)
 
 ---
 
-## ✅ PHẦN 1: GIẤY TỜ CHUẨN XÁC
-Liệt kê các giấy tờ đã pass toàn bộ check, ghi rõ tên giấy tờ + 1 dòng tóm tắt.
-
-| STT | Tên giấy tờ | Ghi chú |
-|-----|-------------|---------|
-| 1 | ... | ... |
-
----
-
-## ⏰ PHẦN 2: GIẤY TỜ SẮP / ĐÃ HẾT HẠN
-Liệt kê kèm tính toán cụ thể.
-
-| STT | Tên giấy tờ | Ngày cấp/hết hạn | Tình trạng | Hành động |
-|-----|-------------|------------------|------------|-----------|
-| 1 | ... | ... | Còn X ngày / Đã hết Y ngày | Cấp lại / Gia hạn |
-
----
-
-## ⚠️ PHẦN 3: ĐIỂM MÂU THUẪN CẦN LÀM RÕ
-Mỗi điểm trình bày theo cấu trúc:
-
-**Lỗi #[N]: [Tiêu đề ngắn]**
-- **Mức độ:** 🔴 Nghiêm trọng / 🟡 Cần làm rõ / 🟢 Ghi chú
-- **Vị trí:** Giấy tờ A vs Giấy tờ B
-- **Chi tiết:** Trên [A] ghi "X", trên [B] ghi "Y"
-- **Nguyên nhân khả dĩ:** ...
-- **Hành động đề xuất:** Yêu cầu khách bổ sung / xin cấp lại / xin xác nhận...
-
-(Nếu OCR thiếu một loại giấy tờ bắt buộc → ghi vào đây dạng **"Lỗi: THIẾU GIẤY TỜ [tên loại]"** chứ không dừng lại.)
-
----
-
-## 📌 PHẦN 4: TÓM TẮT & KHUYẾN NGHỊ
-- **Tình trạng tổng thể:** ✅ Sẵn sàng nộp / ⚠️ Cần bổ sung / 🔴 Cần xử lý gấp
-- **Số lỗi nghiêm trọng:** [N]
-- **Số điểm cần làm rõ:** [N]
-- **Hành động ưu tiên (theo thứ tự):**
-  1. ...
-  2. ...
-  3. ...
-
----
-
-BẮT ĐẦU RÀ SOÁT NGAY KHI NHẬN ĐƯỢC HỒ SƠ OCR. KHÔNG HỎI THÊM TRƯỚC KHI CÓ KẾT QUẢ BƯỚC 1-4.
-NẾU OCR THIẾU MỘT LOẠI GIẤY TỜ → GHI VÀO PHẦN 3 DẠNG "THIẾU GIẤY TỜ" CHỨ KHÔNG DỪNG LẠI."""
+VIẾT NGAY. KHÔNG HỎI THÊM."""
 
 
-def _build_prompt(today: str, applicant: str, coverage: dict,
-                  deterministic_errors: list[dict] | None = None) -> str:
+def _build_nhan_xet_prompt(today: str, applicant: str, coverage: dict,
+                            checklist_table_md: str = "",
+                            deterministic_errors: list[dict] | None = None) -> str:
+    """Build system prompt cho tầng 2: chỉ sinh phần NHẬN XÉT HỒ SƠ."""
     missing_note = ("Còn thiếu (bắt buộc): " + ", ".join(coverage["missing"]) + "."
                     if coverage["missing"] else f"Đã đủ {coverage['required']} mục bắt buộc.")
-    # Inject rule references từ rules.yaml (data-driven Phase 2 + 3).
     try:
         from .rule_loader import generate_rules_block
     except ImportError:
         from rule_loader import generate_rules_block  # type: ignore  # noqa
     rules_block = generate_rules_block()
-    # Tin do bot pre-check deterministic — LLM phải tin tưởng và đưa vào báo cáo PHẦN 3.
-    det_block = ""
     if deterministic_errors:
-        lines = [
-            "## ⚠️ LỖI BOT ĐÃ PHÁT HIỆN (deterministic check, COI LÀ ĐÚNG — phải đưa vào PHẦN 3 báo cáo):",
-        ]
-        for e in deterministic_errors:
-            lines.append(f"- 🔴 [{e['code']}] file `{e.get('ten','?')}` (tag {e.get('tag','?')}): "
-                         f"{e['msg']} → {e.get('action','')}")
-        det_block = "\n".join(lines)
+        det_lines = [f"- [{e['code']}] file `{e.get('ten','?')}` (tag {e.get('tag','?')}): "
+                     f"{e['msg']} → {e.get('action','')}"
+                     for e in deterministic_errors]
+        det_block = "\n".join(det_lines)
+    else:
+        det_block = "(không phát hiện lỗi tự động)"
     repl = {
         "{{TODAY}}": today,
         "{{APPLICANT}}": applicant or "(không rõ tên)",
         "{{PROVINCES}}": _provinces_text(),
-        "{{COVERAGE_BLOCK}}": _coverage_block_text(coverage),
         "{{HAVE}}": str(coverage["have"]),
         "{{REQUIRED}}": str(coverage["required"]),
         "{{MISSING_NOTE}}": missing_note,
+        "{{CHECKLIST_TABLE}}": _html_to_text(checklist_table_md) if checklist_table_md else "(chưa build được bảng checklist)",
         "{{RULES_BLOCK}}": rules_block,
         "{{DETERMINISTIC_ERRORS}}": det_block,
     }
-    s = CHECKLIST_PROMPT_TEMPLATE
+    s = NHAN_XET_PROMPT
     for k, v in repl.items():
         s = s.replace(k, v)
     return s
@@ -713,9 +932,16 @@ async def _call_openrouter_stream(model: str, system: str, user: str, on_chunk,
     import json as _json
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    ollama_key = os.environ.get("WIKI_API_KEY", "")
+    ollama_base = os.environ.get("WIKI_BASE_URL", "https://ollama.com/v1")
     is_openai_model = model.startswith("gpt-") or model.startswith("openai/")
     is_deepseek_model = model.startswith("deepseek/")
-    if is_openai_model and openai_key:
+    is_ollama_model = model.startswith("ollama/")
+    if is_ollama_model:
+        api_endpoint = f"{ollama_base.rstrip('/')}/chat/completions"
+        api_key = ollama_key
+        direct_model = model.split("/", 1)[1]
+    elif is_openai_model and openai_key:
         api_endpoint = "https://api.openai.com/v1/chat/completions"
         api_key = openai_key
         direct_model = model.removeprefix("openai/")
@@ -794,9 +1020,16 @@ def _call_openrouter(model: str, system: str, user: str, timeout: int = 300,
     import httpx
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    ollama_key = os.environ.get("WIKI_API_KEY", "")
+    ollama_base = os.environ.get("WIKI_BASE_URL", "https://ollama.com/v1")
     is_openai_model = model.startswith("gpt-") or model.startswith("openai/")
     is_deepseek_model = model.startswith("deepseek/")
-    if is_openai_model and openai_key:
+    is_ollama_model = model.startswith("ollama/")
+    if is_ollama_model:
+        api_endpoint = f"{ollama_base.rstrip('/')}/chat/completions"
+        api_key = ollama_key
+        direct_model = model.split("/", 1)[1]
+    elif is_openai_model and openai_key:
         api_endpoint = "https://api.openai.com/v1/chat/completions"
         api_key = openai_key
         direct_model = model.removeprefix("openai/")
@@ -848,6 +1081,9 @@ QUY TẮC TUYỆT ĐỐI:
   số tiền…) — copy chính xác từng ký tự, KHÔNG tóm tắt, KHÔNG diễn giải, KHÔNG tự "sửa" cho đẹp.
 - Nếu một thông tin xuất hiện khác nhau ở các giấy → giữ CẢ HAI dạng và ghi vào `notes` (vd "tên chồng:
   LLTP='Nguyễn Bá Thắng' vs CT07='Nguyễn Bá Thẳng' (dấu hỏi)").
+- `criminal_record.issue_date` = NGÀY CẤP ghi trên chính tờ Lý lịch tư pháp — lấy từ file loai="LLTP",
+  KHÔNG phải ngày cấp CCCD, passport hay giấy tờ khác. Nếu đọc được ngày trên tờ LLTP thì điền vào đây;
+  nếu không đọc được → để "".
 - Giấy nào `needs_review=true` / `confidence`="low" / là tờ TỰ KHAI (`loai`="CV", hoặc tiêu đề kiểu "Thông tin cá
   nhân / gia đình (tự khai)") → vẫn copy giá trị nhưng GHI RÕ trong `notes`: "(OCR thấp tin cậy / tự khai — cần đối
   chiếu bản gốc)". TUYỆT ĐỐI không coi giấy đó là nguồn chuẩn cho họ tên / số giấy tờ / địa chỉ khi nó lệch với một
@@ -907,13 +1143,14 @@ def extract_profile_data(dataset: list[dict], applicant: str, today: str,
 def evaluate_profile_logic(profile, applicant: str, today: str, coverage: dict,
                            model: str | None = None, n_docs: int | None = None,
                            dataset: list[dict] | None = None,
-                           case_profile: dict | None = None) -> dict:
-    """TẦNG 2: đọc hồ sơ đã chuẩn hoá (dict) — hoặc dataset thô (list, fallback) — + prompt thẩm định
-    → báo cáo Markdown 4 phần. Trả {report_text, model_used, n_docs} hoặc {report_text:None, error}.
+                           case_profile: dict | None = None,
+                           checklist_table_md: str = "") -> dict:
+    """TẦNG 2: đọc hồ sơ đã chuẩn hoá + bảng checklist → sinh NHẬN XÉT HỒ SƠ (markdown).
+    Trả {report_text, model_used, n_docs} hoặc {report_text:None, error}.
 
     `dataset`: thô từ build_dataset() — cho rule_engine chạy deterministic per-doc.
-    `case_profile` (P3.3): cross-doc profile từ build_case_profile() — cho rule 2.4 + 5.3
-      (parent_dob_mismatch + children_missing_from_xnct).
+    `case_profile` (P3.3): cross-doc profile từ build_case_profile() — cho rule 2.4 + 5.3.
+    `checklist_table_md`: bảng A–H đã build deterministic — nhúng vào system prompt.
     """
     model = model or CHECKLIST_MODEL
     if n_docs is None:
@@ -931,7 +1168,6 @@ def evaluate_profile_logic(profile, applicant: str, today: str, coverage: dict,
             profile if isinstance(profile, list) else (profile or {}).get("documents") or []
         )
         if eval_dataset or case_profile:
-            # P3.3 — pass case_profile để 2 rule mới (2.4, 5.3) trigger được.
             det_errors = detect_deterministic_errors(list(load_validations()), eval_dataset or [],
                                                      profile=case_profile)
             if det_errors:
@@ -940,7 +1176,9 @@ def evaluate_profile_logic(profile, applicant: str, today: str, coverage: dict,
     except Exception as e:  # noqa: BLE001
         print(f"evaluate_profile_logic: rule_engine lỗi: {type(e).__name__}: {e} — bỏ qua deterministic",
               flush=True)
-    system = _build_prompt(today, applicant, coverage, deterministic_errors=det_errors)
+    system = _build_nhan_xet_prompt(today, applicant, coverage,
+                                     checklist_table_md=checklist_table_md,
+                                     deterministic_errors=det_errors)
     if isinstance(profile, list):
         label = "NỘI DUNG OCR HỒ SƠ (JSON — mỗi phần tử một giấy tờ)"
     else:
@@ -967,28 +1205,175 @@ def evaluate_profile_logic(profile, applicant: str, today: str, coverage: dict,
 # ===========================================================================
 # Báo cáo: ghép văn bản LLM + phụ lục → markdown đầy đủ → Google Doc
 # ===========================================================================
-def render_doc_md(report_text: str, applicant: str, today: str, model: str,
-                  coverage: dict, dataset: list[dict]) -> str:
-    parts = [(report_text or "").strip(), ""]
-    parts.append("---\n")
-    parts.append(f"## ⓿ Điểm danh hồ sơ theo CHECKLIST FARM (đếm tự động) — đã có {coverage['have']}/{coverage['required']} mục bắt buộc")
-    if coverage["missing"]:
-        parts.append(f"**Còn thiếu (bắt buộc):** {', '.join(coverage['missing'])}\n")
-    else:
-        parts.append(f"**Đã đủ {coverage['required']} mục bắt buộc.** (xem các mục điều kiện / tùy chọn / làm sau ở bảng dưới)\n")
-    parts.append(_coverage_md_table(coverage))
-    parts.append("")
-    parts.append("## 📎 Phụ lục — danh sách file đã OCR trong hồ sơ")
-    parts.append("| # | Tên file | Loại | Người | Quan hệ | Tóm tắt |")
-    parts.append("|---|---|---|---|---|---|")
+def _nhan_xet_html(text: str) -> str:
+    """Parse LLM NHẬN XÉT text → HTML 2 cột (tổng thể | ưu tiên bổ sung)."""
+    import re as _re
+    text = (text or "").strip()
+    # Tách tại dòng "Ưu tiên bổ sung"
+    split_pat = _re.compile(r"(ưu tiên bổ sung)", _re.IGNORECASE)
+    parts = split_pat.split(text, maxsplit=1)
+    left_raw = parts[0]
+    right_raw = (parts[1] + parts[2]) if len(parts) == 3 else ""
+
+    def _render_left(raw: str) -> str:
+        lines = raw.splitlines()
+        out: list[str] = []
+        verdict_done = False
+        for ln in lines:
+            ln = ln.strip()
+            if not ln or "NHẬN XÉT HỒ SƠ" in ln or "Nhận xét tổng thể" in ln.replace("​", ""):
+                if "Nhận xét tổng thể" in ln:
+                    out.append(f'<p style="font-weight:bold;color:{_C["primary"]};margin:0 0 6px 0">'
+                                f'Nhận xét tổng thể</p>')
+                continue
+            if ln.startswith("✓"):
+                out.append(f'<p style="color:{_C["ok_fg"]};margin:2px 0">{_e(ln)}</p>')
+            elif ln.startswith("✗"):
+                out.append(f'<p style="color:{_C["miss_fg"]};margin:2px 0">{_e(ln)}</p>')
+            elif ln.startswith("!"):
+                out.append(f'<p style="color:{_C["warn_fg"]};margin:2px 0">{_e(ln)}</p>')
+            elif not verdict_done:
+                # first non-empty line after header = verdict
+                verdict_done = True
+                out.append(f'<p style="font-weight:bold;color:{_C["miss_fg"]};margin:0 0 8px 0">'
+                            f'{_e(ln)}</p>')
+            else:
+                out.append(f'<p style="margin:2px 0">{_e(ln)}</p>')
+        return "".join(out)
+
+    def _render_right(raw: str) -> str:
+        lines = raw.splitlines()
+        out: list[str] = []
+        item_pat = _re.compile(r"^(\d+)[.\)]?\s+(.+)")
+        for ln in lines:
+            ln = ln.strip()
+            if not ln or _re.match(r"ưu tiên bổ sung", ln, _re.IGNORECASE):
+                continue
+            m = item_pat.match(ln)
+            if m:
+                num_s = m.group(1)
+                body = m.group(2)
+                # bold tên mục, italic mô tả sau " — "
+                if " — " in body:
+                    item_name, desc = body.split(" — ", 1)
+                    body_html = (f'<b>{_e(item_name.strip())}</b>'
+                                 f'<span style="color:#555;font-style:italic"> — {_e(desc.strip())}</span>')
+                else:
+                    body_html = f'<b>{_e(body)}</b>'
+                out.append(f'<p style="margin:3px 0"><span style="color:{_C["primary"]};'
+                            f'font-weight:bold">{_e(num_s)}.</span> {body_html}</p>')
+            else:
+                out.append(f'<p style="margin:2px 0;font-size:8.5pt;color:#555">{_e(ln)}</p>')
+        return "".join(out)
+
+    banner_style = (f"background:{_C['primary']};color:#fff;font-family:Arial,sans-serif;"
+                    f"font-weight:bold;font-size:11pt;padding:7px 12px;margin:16px 0 0 0")
+    left_html  = _render_left(left_raw)
+    right_html = _render_right(right_raw)
+    cell_style = (f"width:50%;vertical-align:top;padding:10px 14px;"
+                  f"border:1px solid {_C['bd']};font-family:Arial,sans-serif;font-size:9pt")
+    return (
+        f'<div style="{banner_style}">📋 NHẬN XÉT HỒ SƠ &amp; ƯU TIÊN BỔ SUNG</div>'
+        f'<table style="width:100%;border-collapse:collapse;margin-bottom:16px">'
+        f'<tr>'
+        f'<td style="{cell_style}">'
+        f'<p style="font-weight:bold;color:{_C["primary"]};margin:0 0 8px 0">Nhận xét tổng thể</p>'
+        f'{left_html}</td>'
+        f'<td style="{cell_style};border-left:none">'
+        f'<p style="font-weight:bold;color:{_C["primary"]};margin:0 0 8px 0">Ưu tiên bổ sung</p>'
+        f'{right_html}</td>'
+        f'</tr></table>'
+    )
+
+
+def render_doc_md(nhan_xet_text: str, applicant: str, today: str, model: str,
+                  coverage: dict, dataset: list[dict],
+                  checklist_table_md: str = "", birth_year: str = "") -> str:
+    """Sinh báo cáo HTML đầy đủ: header + legend + bảng A–H + nhận xét 2 cột + phụ lục."""
+    n = len(dataset)
+    by_part = f" — {birth_year}" if birth_year else ""
+    P = f"font-family:Arial,sans-serif"
+
+    # ── Page-level header (company name + subtitle) ───────────────────────────
+    doc_header = (
+        f'<table style="width:100%;border-collapse:collapse;{P};margin-bottom:4px">'
+        f'<tr style="background:{_C["primary"]};color:#fff">'
+        f'<td style="padding:5px 10px;font-size:8.5pt;font-weight:bold">'
+        f'Donghanh Investment and Immigration Consultation</td>'
+        f'<td style="padding:5px 10px;font-size:8.5pt;text-align:right">'
+        f'Checklist &middot; {_e(applicant)}</td>'
+        f'</tr></table>'
+    )
+
+    # ── Title banner ─────────────────────────────────────────────────────────
+    title_banner = (
+        f'<div style="background:{_C["primary"]};color:#fff;{P};'
+        f'font-size:12pt;font-weight:bold;padding:8px 12px;margin-bottom:8px">'
+        f'CHECKLIST HỒ SƠ &nbsp;{_e(applicant)}{_e(by_part)}'
+        f'&nbsp; &middot; &nbsp;Ngày kiểm tra: <b>{_e(today)}</b>'
+        f'&nbsp; &middot; &nbsp;Tài liệu rà soát: <b>{n}</b>'
+        f'</div>'
+    )
+
+    # ── Legend ────────────────────────────────────────────────────────────────
+    legend = _legend_html()
+
+    # ── Bảng A–H (HTML đã build) ──────────────────────────────────────────────
+    table_html = checklist_table_md or f'<p style="color:red">(bảng checklist chưa build được)</p>'
+
+    # ── NHẬN XÉT (LLM, 2 cột) ────────────────────────────────────────────────
+    nhan_xet = _nhan_xet_html(nhan_xet_text)
+
+    # ── PHỤ LỤC ──────────────────────────────────────────────────────────────
+    _HDR = f"background:{_C['primary']};color:#fff;font-weight:bold;padding:4px 8px;border:1px solid {_C['bd']};{P};font-size:9pt"
+    _ROW = f"padding:4px 8px;border:1px solid {_C['bd']};{P};font-size:8.5pt"
+    appendix_rows = [
+        f'<tr style="background:{_C["primary"]};color:#fff">'
+        f'<th style="{_HDR};width:3%;text-align:center">#</th>'
+        f'<th style="{_HDR};width:22%">Tên file</th>'
+        f'<th style="{_HDR};width:9%">Loại</th>'
+        f'<th style="{_HDR};width:12%">Người</th>'
+        f'<th style="{_HDR}">Tóm tắt</th>'
+        f'</tr>'
+    ]
     for i, d in enumerate(dataset, 1):
-        tt = (d.get("tom_tat") or "").replace("\n", " ").replace("|", "/")[:220]
-        qh = d.get("quan_he") or ""
-        parts.append(f"| {i} | {d.get('ten','')} | {d.get('loai','')} | {d.get('nguoi','')} | {qh} | {tt} |")
-    parts.append("")
-    parts.append(f"_Báo cáo do bot tạo tự động · model {model} · {today} · {len(dataset)} giấy tờ. "
-                 f"Đây là bản rà soát máy — nhân viên cần đối chiếu lại bản gốc trước khi nộp._")
-    return "\n".join(parts) + "\n"
+        tt = (d.get("tom_tat") or "").replace("\n", " ")[:220]
+        row_bg = _C["alt"] if i % 2 == 0 else "#fff"
+        appendix_rows.append(
+            f'<tr style="background:{row_bg}">'
+            f'<td style="{_ROW};text-align:center;color:#555">{i}</td>'
+            f'<td style="{_ROW};font-weight:bold">{_e(d.get("ten", ""))}</td>'
+            f'<td style="{_ROW}">{_e(d.get("loai", ""))}</td>'
+            f'<td style="{_ROW}">{_e(d.get("nguoi", ""))}</td>'
+            f'<td style="{_ROW};font-style:italic;color:#444">{_e(tt)}</td>'
+            f'</tr>'
+        )
+    appendix_banner = (
+        f'<div style="background:{_C["primary"]};color:#fff;{P};'
+        f'font-size:11pt;font-weight:bold;padding:7px 12px;margin:16px 0 0 0">'
+        f'&#128273; PHỤ LỤC — DANH SÁCH FILE ĐÃ OCR</div>'
+    )
+    appendix = (
+        appendix_banner
+        + f'<table style="width:100%;border-collapse:collapse;margin-bottom:16px">'
+        + "\n".join(appendix_rows)
+        + f'</table>'
+    )
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    footer = (
+        f'<p style="{P};font-size:8pt;color:#888;text-align:center;'
+        f'border-top:1px solid {_C["bd"]};padding-top:6px;margin-top:4px">'
+        f'Báo cáo do bot tạo tự động &middot; {_e(today)} &middot; {n} tài liệu '
+        f'&middot; Nhân viên đối chiếu bản gốc trước khi nộp.</p>'
+    )
+
+    body = "\n".join([doc_header, title_banner, legend, table_html, nhan_xet, appendix, footer])
+    return (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<style>body{margin:20px;font-family:Arial,sans-serif}</style>'
+        f'</head><body>{body}</body></html>'
+    )
 
 
 def _write_google_doc(case_folder_id: str, name: str, md_text: str, drive_id: str | None) -> str:
@@ -1000,12 +1385,12 @@ def _write_google_doc(case_folder_id: str, name: str, md_text: str, drive_id: st
     from .google_clients import drive
     from .drive_helpers import find_file_by_name
     DOC_MIME = "application/vnd.google-apps.document"
-    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as fh:
         fh.write(md_text)
         mpath = fh.name
     try:
         existing = find_file_by_name(name, case_folder_id, drive_id, mime_type=DOC_MIME)
-        media = MediaFileUpload(mpath, mimetype="text/markdown", resumable=False)
+        media = MediaFileUpload(mpath, mimetype="text/html", resumable=False)
         if existing:
             # Fix B: update content in place → giữ Doc ID + webViewLink → link cũ
             # trong tin Telegram vẫn click được. Drive auto-lưu version history (File →
@@ -1367,18 +1752,46 @@ def run_and_write(case_folder_id: str, applicant: str, drive_id: str | None,
         print(f"checklist: build_case_profile lỗi — bỏ qua: {type(e).__name__}: {e}", flush=True)
         _case_profile = None
 
-    # --- Tầng 2: đánh giá business-logic (model reasoning) → báo cáo Markdown -
-    # Truyền `dataset` thô (per-doc rule) + `case_profile` (cross-doc rule 2.4 + 5.3).
+    # --- Build bảng checklist A–H (deterministic) — trước khi gọi LLM ---
+    _det_for_table: list[dict] = []
+    try:
+        try:
+            from .rule_loader import load_validations
+            from .rule_engine import detect_deterministic_errors
+        except ImportError:
+            from rule_loader import load_validations  # type: ignore  # noqa
+            from rule_engine import detect_deterministic_errors  # type: ignore  # noqa
+        _det_for_table = detect_deterministic_errors(list(load_validations()), dataset,
+                                                      profile=_case_profile)
+    except Exception as e:  # noqa: BLE001
+        print(f"checklist: det_errors for table lỗi: {type(e).__name__}: {e}", flush=True)
+    _has_marriage = coverage.get("has_marriage", False)
+    _has_kids = (coverage.get("n_gks", 0) >= 2) or ("XN hoc" in coverage.get("tags_present", []))
+    checklist_table_md = _build_main_table(dataset, coverage, _det_for_table, today,
+                                            _has_marriage, _has_kids)
+
+    # --- Tầng 2: sinh NHẬN XÉT HỒ SƠ (model reasoning) ---
     res = evaluate_profile_logic(eval_input, applicant, today, coverage, model=model, n_docs=n_docs,
-                                 dataset=dataset, case_profile=_case_profile)
+                                 dataset=dataset, case_profile=_case_profile,
+                                 checklist_table_md=checklist_table_md)
     if not res.get("report_text"):
         return {"ran": False, "error": res.get("error") or "evaluate_profile_logic không trả về báo cáo",
                 "coverage": coverage, "model": res.get("model_used"), "extract_model": extract_model,
                 "n_docs": n_docs}
     report_text = res["report_text"]
     model_used = res["model_used"]
+
+    # Trích birth_year từ profile để hiển thị trong header
+    birth_year = ""
+    if isinstance(profile_out, dict):
+        dob = (profile_out.get("personal_info") or {}).get("dob", "")
+        m_yr = re.search(r"(\d{4})", dob) if dob else None
+        if m_yr:
+            birth_year = m_yr.group(1)
+
     doc_name = f"Bao cao tham dinh - {title_case_ascii(applicant) or 'Unknown'}"
-    full_md = render_doc_md(report_text, applicant, today, model_used, coverage, dataset)
+    full_md = render_doc_md(report_text, applicant, today, model_used, coverage, dataset,
+                             checklist_table_md=checklist_table_md, birth_year=birth_year)
 
     report_link = ""
     try:
@@ -1459,7 +1872,15 @@ def run_from_md_contents(
     except Exception as e:  # noqa: BLE001
         print(f"run_from_md_contents: rule_engine lỗi: {type(e).__name__}: {e}", flush=True)
 
-    system = _build_prompt(today, applicant, coverage, deterministic_errors=det_errors)
+    # Build bảng checklist A–H (deterministic) — trước khi gọi LLM
+    _has_marriage = coverage.get("has_marriage", False)
+    _has_kids = (coverage.get("n_gks", 0) >= 2) or ("XN hoc" in coverage.get("tags_present", []))
+    checklist_table_md = _build_main_table(dataset, coverage, det_errors, today,
+                                            _has_marriage, _has_kids)
+
+    system = _build_nhan_xet_prompt(today, applicant, coverage,
+                                     checklist_table_md=checklist_table_md,
+                                     deterministic_errors=det_errors)
     content_block = "\n\n---\n\n".join(
         f"### Giấy tờ {i + 1}\n{mc}" for i, mc in enumerate(md_contents) if mc.strip()
     )
@@ -1494,7 +1915,8 @@ def run_from_md_contents(
                 "coverage": coverage, "model": model_used}
 
     doc_name = f"Bao cao tham dinh - {title_case_ascii(applicant) or 'Unknown'}"
-    full_md = render_doc_md(report_text, applicant, today, model_used, coverage, dataset)
+    full_md = render_doc_md(report_text, applicant, today, model_used, coverage, dataset,
+                             checklist_table_md=checklist_table_md)
     report_link = ""
     try:
         report_link = _write_google_doc(case_folder_id, doc_name, full_md, drive_id)
@@ -1545,10 +1967,11 @@ if __name__ == "__main__":
     assert callable(extract_profile_data) and callable(evaluate_profile_logic) and callable(run_and_write)
     assert _PROFILE_EXTRACT_SYSTEM and "GIỮ NGUYÊN VĂN" in _PROFILE_EXTRACT_SYSTEM and CHECKLIST_EXTRACT_MODEL
     assert len(REQUIRED_DOCS) == 26 and _REQUIRED_TOTAL == 18
+    assert len(REPORT_DISPLAY_ROWS) == 29
     assert {"Passport", "Sao ke", "Anh gia dinh", "Dai ly NS", "So dat NN", "The Visa-MC"} <= CHECKLIST_DOC_TAGS
     assert "GKS_con" not in CHECKLIST_DOC_TAGS
-    ds = [{"loai": "CCCD", "ten": "CCCD-Test.pdf", "nguoi": "Test", "tom_tat": "x", "du_lieu": {}, "key_fields": {}},
-          {"loai": "Passport", "ten": "Passport-Test.pdf", "nguoi": "Test", "tom_tat": "y", "du_lieu": {}, "key_fields": {}}]
+    ds = [{"loai": "CCCD", "ten": "CCCD-Test.pdf", "nguoi": "Test", "quan_he": "", "tom_tat": "x", "du_lieu": {}, "key_fields": {}, "needs_review": False},
+          {"loai": "Passport", "ten": "Passport-Test.pdf", "nguoi": "Test", "quan_he": "", "tom_tat": "y", "du_lieu": {}, "key_fields": {}, "needs_review": False}]
     cov = compute_coverage(ds)
     assert cov["required"] == 18 and cov["have"] == 2
     _i3 = next(i for i in cov["items"] if i["loai"].startswith("3."))
@@ -1557,15 +1980,21 @@ if __name__ == "__main__":
     _i3b = next(i for i in cov2["items"] if i["loai"].startswith("3."))
     assert _i3b["applicable"] is True and _i3b["present"] is True
     print("coverage:", cov["have"], "/", cov["required"], "| missing:", len(cov["missing"]), "mục")
-    p = _build_prompt("12/05/2026", "Nguyen Van Test", cov)
-    assert "VAI TRÒ" in p and "PHẦN 4" in p and "12/05/2026" in p and "Nguyen Van Test" in p and "{{" not in p and "CHECKLIST HỒ SƠ FARM" in p and "_dia_gioi" in p
-    _plc = re.sub(r"\s+", " ", p.lower())  # gộp khoảng trắng để khỏi vướng wrap dòng
-    assert "đừng mặc định chủ hộ" in _plc and "không có tên đương đơn trong bảng đó" in _plc and "ocr thấp tin cậy" in _plc
-    assert "không yêu cầu khách bổ sung giấy xác nhận" in _plc  # bỏ quy tắc "Giấy xác nhận số CMND"
+    # Test bảng checklist A–H
+    tbl = _build_main_table(ds, cov, [], "19/05/2026", False, False)
+    assert "A — GIẤY TỜ TÙY THÂN" in tbl
+    assert "✗ Chưa có" in tbl      # nhiều mục bắt buộc thiếu với ds nhỏ
+    assert "✓ Đã có" in tbl        # CCCD + Passport có
+    assert "—" in tbl              # mục ket_hon/co_con không áp dụng
+    print("checklist table rows:", tbl.count("\n"))
+    # Test prompt NHẬN XÉT
+    p = _build_nhan_xet_prompt("19/05/2026", "Nguyen Van Test", cov, checklist_table_md=tbl)
+    assert "VAI TRÒ" in p and "NHẬN XÉT HỒ SƠ" in p and "19/05/2026" in p and "Nguyen Van Test" in p
+    assert "{{" not in p  # không còn placeholder chưa fill
+    print("prompt len:", len(p))
     _t = _trim_dataset_for_llm([{"loai": "CV", "ten": "x", "needs_review": True, "confidence": "low",
                                  "du_lieu": {}, "key_fields": {}, "tom_tat": "t"}])
     assert _t[0].get("needs_review") is True and _t[0].get("confidence") == "low"
-    print("prompt len:", len(p))
     # địa giới: build_dia_gioi qua lib.diadia
     _dg = build_dia_gioi(
         [{"loai": "CCCD", "ten": "x", "du_lieu": {"noi_thuong_tru": "Phường Liên Bảo, TP Vĩnh Yên, Tỉnh Vĩnh Phúc"}},
@@ -1576,9 +2005,10 @@ if __name__ == "__main__":
     print("dia_gioi: addrs", len(_dg["dia_chi_da_tra"]), "| doi_chieu", len(_dg["doi_chieu"]))
     assert should_run_checklist({"items": [{"tag": "CCCD"}]}) is True
     assert should_run_checklist({"items": [{"tag": "Khac"}]}) is False
-    md = render_doc_md("## 📋 BÁO CÁO THẨM ĐỊNH HỒ SƠ\n**Khách hàng:** Test\n\n## ⚠️ PHẦN 3: ...\n\n## 📌 PHẦN 4: TÓM TẮT & KHUYẾN NGHỊ\n- **Tình trạng tổng thể:** ✅ Sẵn sàng nộp",
-                      "Test", "12/05/2026", "test-model", cov, ds)
-    assert "Phụ lục" in md and "Điểm danh" in md and "CHECKLIST FARM" in md
+    md = render_doc_md("## 📋 NHẬN XÉT HỒ SƠ & ƯU TIÊN BỔ SUNG\nNhận xét tổng thể\nSẵn sàng nộp",
+                      "Test", "12/05/2026", "test-model", cov, ds,
+                      checklist_table_md=tbl, birth_year="1990")
+    assert "CHECKLIST HỒ SƠ" in md and "PHỤ LỤC" in md and "NHẬN XÉT HỒ SƠ" in md
     print("render_doc_md len:", len(md))
     l1, det = summarize_for_telegram("## 📌 PHẦN 4: TÓM TẮT & KHUYẾN NGHỊ\n- **Tình trạng tổng thể:** ✅ Sẵn sàng nộp\n- **Số lỗi nghiêm trọng:** 0",
                                      cov, "test-model", "http://x/doc")

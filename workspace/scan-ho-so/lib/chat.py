@@ -268,19 +268,61 @@ def _fetch_tham_dinh_doc(case_folder_id: str, applicant: str, drive_id) -> str:
 
 
 def build_case_context(case_folder_id: str, applicant: str, drive_id) -> dict:
-    from .checklist import build_dataset, compute_coverage
-    dataset = build_dataset(case_folder_id, drive_id)
+    from .checklist import compute_coverage
+
+    # Fast path: dùng ctx cache local (lưu bởi wiki_builder sau mỗi lần OCR)
+    # Tránh build_dataset tải 60+ JSON từ Drive (~30-60s → cache hit <1ms)
+    dataset = None
+    wiki_text = None
+    try:
+        from .wiki_builder import load_wiki, load_ctx_cache
+        wiki_text = load_wiki(case_folder_id)
+        dataset = load_ctx_cache(case_folder_id)
+        if dataset is not None:
+            print(f"chat: ctx cache hit ({len(dataset)} docs)", flush=True)
+    except Exception as _ce:  # noqa: BLE001
+        print(f"chat: ctx cache lỗi: {type(_ce).__name__}: {_ce}", flush=True)
+
+    if dataset is None:
+        # Fallback: tải từ Drive (cache miss) rồi lưu ctx cache cho lần sau
+        from .checklist import build_dataset
+        import json as _json
+        print(f"chat: ctx cache miss — build_dataset từ Drive (lần sau sẽ nhanh hơn)", flush=True)
+        dataset = build_dataset(case_folder_id, drive_id)
+        try:
+            from .wiki_builder import WIKI_DIR, _safe_filename, build_or_update_wiki
+            WIKI_DIR.mkdir(parents=True, exist_ok=True)
+            _cp = WIKI_DIR / f"{_safe_filename(case_folder_id)}.ctx.json"
+            _cp.write_text(_json.dumps(dataset, ensure_ascii=False), encoding="utf-8")
+            print(f"chat: ctx cache saved ({len(dataset)} docs) → {_cp}", flush=True)
+            # Rebuild wiki từ full dataset để LLM có đủ context
+            _wiki_items = [
+                {"tag": d.get("loai",""), "subject": d.get("nguoi",""),
+                 "relation": d.get("quan_he",""), "folder": d.get("folder",""),
+                 "confidence": d.get("confidence",""), "drive_link": d.get("drive_link",""),
+                 "new_name": d.get("ten",""), "status": "uploaded",
+                 "md_content": d.get("tom_tat","")}
+                for d in dataset if d.get("ten")
+            ]
+            if _wiki_items:
+                build_or_update_wiki(_wiki_items, case_folder_id, applicant, "")
+                wiki_text = load_wiki(case_folder_id)
+                print(f"chat: wiki rebuilt ({len(_wiki_items)} docs)", flush=True)
+        except Exception as _se:  # noqa: BLE001
+            print(f"chat: ctx cache save lỗi: {_se}", flush=True)
+
     cov = compute_coverage(dataset)
     report_text = _fetch_tham_dinh_doc(case_folder_id, applicant, drive_id)
     docs, name_to_link = _trim_for_chat(dataset)
-    try:  # tra địa giới hành chính cũ↔mới cho mọi địa chỉ trong hồ sơ → ground-truth cho LLM (đỡ phải NEED_ADDR)
+    try:
         from .checklist import build_dia_gioi
         dia_gioi = build_dia_gioi(dataset, None)
     except Exception as e:  # noqa: BLE001
         print(f"chat: build_dia_gioi lỗi: {type(e).__name__}: {e}", flush=True)
         dia_gioi = None
     return {"docs": docs, "name_to_link": name_to_link, "coverage": cov, "dia_gioi": dia_gioi,
-            "report_text": report_text, "doc_names": [d["ten"] for d in docs if d["ten"]], "n_docs": len(dataset)}
+            "report_text": report_text, "doc_names": [d["ten"] for d in docs if d["ten"]],
+            "n_docs": len(dataset), "wiki": wiki_text}
 
 
 def get_case_context(case_folder_id: str, applicant: str, drive_id) -> dict:
@@ -884,16 +926,28 @@ async def answer_question(case_meta: dict, ctx: dict, history, question: str, dr
     report_text = (ctx.get("report_text") or "")[:8000]
     dg = ctx.get("dia_gioi") or None
     dia_gioi_json = json.dumps(dg, ensure_ascii=False) if isinstance(dg, dict) and (dg.get("dia_chi_da_tra") or dg.get("doi_chieu")) else ""
+    wiki_text = (ctx.get("wiki") or "").strip()
     # KHÔNG đưa `drive_link` cho model — nó hay copy URL dài vào câu trả lời; bot tự gắn link từ name_to_link.
     docs_llm = [{k: v for k, v in (d or {}).items() if k != "drive_link"} for d in (ctx.get("docs") or [])]
     docs_json = json.dumps(docs_llm, ensure_ascii=False)
     cov_block = _coverage_block(ctx.get("coverage") or {})
     hist = _history_text(history)
+    n_docs = ctx.get("n_docs") or len(docs_llm)
 
     def mk_user(extra: str = "") -> str:
+        # Dùng wiki nếu có VÀ đã cover đủ docs (≥80% so với dataset)
+        # → tránh wiki cũ/thiếu che khuất docs_json đầy đủ
+        wiki_doc_count = wiki_text.count("### ") if wiki_text else 0
+        use_wiki = wiki_text and (n_docs == 0 or wiki_doc_count >= max(1, n_docs * 0.8))
+        if use_wiki:
+            docs_section = f"--- WIKI HỒ SƠ (tổng hợp đầy đủ, cross-ref theo người + loại giấy tờ) ---\n{wiki_text}\n"
+        else:
+            docs_section = (
+                f"--- DỮ LIỆU GIẤY TỜ ĐÃ OCR (JSON — mỗi phần tử 1 giấy tờ; ten/loai/nguoi/tom_tat/du_lieu/key_fields) ---\n{docs_json}\n"
+            )
         return (f"=== HỒ SƠ KHÁCH HÀNG: {applicant} | visa {visa} | agent {agent} ===\n"
                 f"--- {cov_block} ---\n"
-                f"--- DỮ LIỆU GIẤY TỜ ĐÃ OCR (JSON — mỗi phần tử 1 giấy tờ; ten/loai/nguoi/tom_tat/du_lieu/key_fields) ---\n{docs_json}\n"
+                + docs_section
                 + (f"--- ĐỊA GIỚI HÀNH CHÍNH (tra cứu DETERMINISTIC từ bảng chính thức 2025, cũ↔mới tới cấp xã/phường — GROUND-TRUTH; `doi_chieu`=`same` ⇒ hai địa chỉ chỉ khác do tên trước/sau cải cách, KHÔNG phải mâu thuẫn) ---\n{dia_gioi_json}\n" if dia_gioi_json else "")
                 + (f"--- BÁO CÁO THẨM ĐỊNH (trích) ---\n{report_text}\n" if report_text else "")
                 + extra
